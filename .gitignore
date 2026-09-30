@@ -1,0 +1,8 @@
+.vscode
+
+.go
+
+bin/
+.env
+tmp
+test.cov

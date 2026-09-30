@@ -1,0 +1,21 @@
+services:
+    air:
+        image: cosmtrek/air:latest
+        working_dir: /var/app
+        expose:
+            - 5000
+        volumes:
+            - .:/var/app
+            - ./.go/pkg:/go/pkg
+        labels:
+            traefik.enable: "true"
+            traefik.http.routers.app.rule: Host(`app.loc`)
+            traefik.http.routers.app.entrypoints: web
+
+    golang:
+        image: golang:1.27
+        working_dir: /var/app
+        env_file: .env
+        volumes:
+            - .:/var/app
+            - ./.go/pkg:/go/pkg
