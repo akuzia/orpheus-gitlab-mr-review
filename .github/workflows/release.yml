@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Test and lint
+    uses: ./.github/workflows/checks.yml
+
+  build:
+    name: Build
+    needs: checks
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+      GOOS: linux
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build application
+        run: go build -buildvcs=false -trimpath -o bin/app .
+
+      - name: Upload application
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ github.run_id }}
+          path: bin/app
+          if-no-files-found: error
+          retention-days: 1
+
+  image:
+    name: Build and push image
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Download application
+        uses: actions/download-artifact@v4
+        with:
+          name: app-${{ github.run_id }}
+          path: bin
+
+      - name: Make application executable
+        run: chmod +x bin/app
+
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@v6
+        with:
+          images: retailcrm/orpheus-gitlab-mr-review
+          tags: type=semver,pattern={{version}}
+
+      - name: Check publishing configuration
+        env:
+          IMAGE_TAGS: ${{ steps.metadata.outputs.tags }}
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          test -n "$IMAGE_TAGS" || { echo 'A valid version tag such as v1.2.3 is required.' >&2; exit 1; }
+          test -n "$DOCKERHUB_USERNAME" || { echo 'Set the DOCKERHUB_USERNAME repository variable.' >&2; exit 1; }
+          test -n "$DOCKERHUB_TOKEN" || { echo 'Set the DOCKERHUB_TOKEN repository secret.' >&2; exit 1; }
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}

@@ -1,0 +1,45 @@
+name: Checks
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run go vet
+        run: go vet -composites=false ./...
+
+      - name: Run tests
+        run: go test -coverprofile=test.cov -v -short -cover -race ./...
+
+      - name: Print coverage
+        run: go tool cover -func=test.cov
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Run golangci-lint
+        run: >-
+          docker run --rm
+          --volume "${{ github.workspace }}:/app"
+          --workdir /app
+          golangci/golangci-lint:v2.13.2
+          golangci-lint run ./...
