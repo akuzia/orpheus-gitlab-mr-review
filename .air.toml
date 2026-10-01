@@ -1,0 +1,14 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+cmd = "GOOS=linux CGO_ENABLED=0 go build -buildvcs=false -trimpath -o ./bin/app ."
+entrypoint = ["./bin/app", "run"]
+include_ext = ["go"]
+exclude_regex = ["_test.go"]
+delay = 1000
+stop_on_error = true
+send_interrupt = true
+# SHUTDOWN_TIMEOUT_SECONDS is 20 by default. Give the application time to
+# finish graceful shutdown before Air sends a hard kill.
+kill_delay = "25s"

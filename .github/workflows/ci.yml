@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "**"
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run go vet
+        run: go vet -composites=false ./...
+
+      - name: Run tests
+        run: go test -coverprofile=test.cov -v -short -cover -race ./...
+
+      - name: Print coverage
+        run: go tool cover -func=test.cov
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Run golangci-lint
+        run: >-
+          docker run --rm
+          --volume "${{ github.workspace }}:/app"
+          --workdir /app
+          golangci/golangci-lint:v2.13.2
+          golangci-lint run ./...
+
+  build:
+    name: Build
+    needs:
+      - test
+      - lint
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+      GOOS: linux
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build application
+        run: go build -buildvcs=false -trimpath -o bin/app .
+
+      - name: Upload application
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ github.run_id }}
+          path: bin/app
+          if-no-files-found: error
+          retention-days: 1
+
+  image:
+    name: Build and push image
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Download application
+        uses: actions/download-artifact@v4
+        with:
+          name: app-${{ github.run_id }}
+          path: bin
+
+      - name: Make application executable
+        run: chmod +x bin/app
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=raw,value=latest
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}

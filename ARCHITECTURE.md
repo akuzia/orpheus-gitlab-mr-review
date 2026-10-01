@@ -245,11 +245,10 @@ path.
 - постоянного workflow namespace;
 - канонического MR key;
 - immutable GitLab user ID bot-reviewer;
-- fingerprints входного snapshot.
+- fingerprints входного review input.
 
 Username reviewer-а хранится как диагностический атрибут, но authorization и ownership checks
-выполняются по immutable user ID. Если username задан в конфигурации, при старте connector проверяет,
-что authenticated GitLab user соответствует ему.
+выполняются по immutable user ID.
 
 ### 5.2. Diff fingerprint
 
@@ -283,7 +282,8 @@ JSON со следующими полями:
 
 ### 5.3. Review fingerprint
 
-`review_fingerprint` определяет полный смысловой вход ревью. Он включает:
+`review_fingerprint` определяет admission input connector-а: состояние, по которому решается, нужна ли
+новая session. Он включает:
 
 - versioned diff payload;
 - актуальное MR description;
@@ -297,6 +297,9 @@ JSON со следующими полями:
 
 Не учитываются собственные notes bot-reviewer, иначе публикация результата сама бесконечно меняла бы
 fingerprint. Activity сортируется детерминированно, например по note ID и нормализованному body.
+
+Live MR-контекст, который агент читает через `glab`, не является частью fingerprint. Проверяемый код
+при этом остаётся неизменным: агент работает только с pinned diff refs.
 
 Два fingerprints нужны по разным причинам:
 
@@ -367,7 +370,7 @@ Metal instructions переносятся по смыслу и адаптиру�
 ### 6.3. Runtime configuration
 
 Environment-specific конфигурация задаётся преимущественно переменными окружения. В бинарник нельзя
-встраивать URLs окружения, tokens, project allowlist или profile names.
+встраивать URLs окружения, tokens или profile names.
 
 Целевой ENV-контракт приведён ниже. При реализации имена можно изменить только согласованно с
 deployment-конфигурацией и пользовательской документацией; сама семантика обязательности является
@@ -380,27 +383,25 @@ deployment-конфигурацией и пользовательской док
 | `ORPHEUS_WEB_URL` | да | публичный base URL для диагностических ссылок в MR |
 | `GITLAB_BASE_URL` | да | base URL обслуживаемой GitLab installation |
 | `GITLAB_TOKEN` | да | credential authenticated bot-а; до 1.0 также может передаваться sandbox для read-only работы |
-| `GITLAB_REVIEWER_USERNAME` | нет | ожидаемый username; если задан, валидирует current user, но не заменяет immutable user ID |
-| `GITLAB_PROJECT_PATHS` | нет | разделённый запятыми allowlist project paths; пустое значение означает все доступные проекты |
 | `ORPHEUS_AGENT_PROFILE` | да | профиль авторизации/исполнения агента |
 | `ORPHEUS_SANDBOX_TEMPLATE` | да | AgentBox template |
 | `ORPHEUS_AGENT_MODEL` | нет | явный model override; отсутствие использует policy профиля/Orpheus |
-| `POLL_INTERVAL` | нет | период polling в Go duration syntax |
+| `POLL_INTERVAL_SECONDS` | нет | период polling в секундах |
 | `MAX_CONCURRENT_REVIEWS` | нет | локальный предел одновременно активных sessions |
-| `RUN_TIMEOUT` | нет | deadline одного Orpheus run |
-| `HOOK_TIMEOUT` | нет | deadline каждого hook |
-| `HTTP_TIMEOUT` | нет | deadline одиночного GitLab/Orpheus request |
-| `SHUTDOWN_TIMEOUT` | нет | время на уже начатые HTTP calls после снятия readiness |
+| `RUN_TIMEOUT_SECONDS` | нет | deadline одного Orpheus run в секундах |
+| `HOOK_TIMEOUT_SECONDS` | нет | deadline каждого hook в секундах |
+| `HTTP_TIMEOUT_SECONDS` | нет | deadline одиночного GitLab/Orpheus request в секундах |
+| `SHUTDOWN_TIMEOUT_SECONDS` | нет | время в секундах на уже начатые HTTP calls после снятия readiness |
 | `MAX_SESSION_REQUEST_BYTES` | нет | локальный fail-closed предел `CreateSession` request |
 | `MAX_HOOK_OUTPUT_BYTES` | нет | connector/helper limit ниже либо равный server limit Orpheus |
 | `MAX_BUNDLE_UNCOMPRESSED_BYTES` | нет | предел распакованного publication payload |
 | `LOG_LEVEL`, `LOG_FORMAT` | нет | настройки structured logging |
 
-Списки нормализуются: пробелы обрезаются, пустые элементы удаляются, дубликаты запрещаются. Duration
-должны быть положительными. Byte limits и concurrency имеют безопасные ненулевые defaults и верхние
-границы. URL разрешают только `http`/`https`, запрещают embedded credentials и нормализуют trailing
-slash. Конфигурация читается на старте и считается immutable до завершения процесса; live reload не
-поддерживается.
+Списки нормализуются: пробелы обрезаются, пустые элементы удаляются, дубликаты запрещаются. Значения
+времени задаются целым положительным числом секунд. Byte limits и concurrency имеют безопасные
+ненулевые defaults и верхние границы. URL разрешают только `http`/`https`, запрещают embedded
+credentials и нормализуют trailing slash. Конфигурация читается на старте и считается immutable до
+завершения процесса; live reload не поддерживается.
 
 Конфигурация валидируется полностью до перехода процесса в ready. Неизвестное критичное значение,
 отсутствие обязательного URL/token/profile или некорректный limit приводят к startup failure.
@@ -419,9 +420,8 @@ GitLab и Orpheus credentials поступают через environment/secret i
 
 ### 7.1. Polling кандидатов
 
-Connector с заданным interval получает MR, в которых authenticated bot назначен reviewer-ом. Если
-настроен `project_paths`, поиск ограничивается ими. Пустой список означает все проекты, доступные
-token-у и поддержанные GitLab API query.
+Connector с заданным interval получает MR, в которых authenticated bot назначен reviewer-ом. Scope
+проектов определяется доступом bot-а в GitLab и явным назначением его reviewer-ом.
 
 Один poll tick логически состоит из двух фаз:
 
@@ -439,10 +439,8 @@ Reconciliation выполняется раньше admission. Это не поз
 Новая session может быть создана, только если одновременно выполняются условия:
 
 - MR находится в состоянии `opened`;
-- MR не исключён согласованными правилами eligibility, включая draft policy;
 - bot всё ещё присутствует среди reviewers;
 - reviewer identity подтверждена immutable GitLab user ID;
-- project входит в scope;
 - diff refs полны;
 - для этой reviewer assignment/review fingerprint нет активной или уже принятой Orpheus session;
 - нет completion/error/skip lifecycle, который должен быть завершён раньше нового запуска;
@@ -451,21 +449,25 @@ Reconciliation выполняется раньше admission. Это не поз
 Одна и та же reviewer assignment создаёт не более одной session. Изменение binary/workflow revision
 не делает кандидата новым.
 
-### 7.3. Снимок входа
+Draft сам по себе не исключает MR: явное назначение bot-reviewer означает запрос на ревью.
 
-Перед созданием session connector загружает согласованный snapshot:
+### 7.3. Review input
+
+Перед созданием session connector загружает согласованный control-plane input:
 
 - MR и project;
 - diff refs;
 - notes, нужные для `review_fingerprint`;
-- discussions с author/resolution/position;
 - bot identity;
-- trigger reason;
 - Git clone URL и web URL MR.
 
-Затем connector вычисляет fingerprints, создаёт artifacts path и рендерит prompt. Все данные session
-фиксируются одним `CreateSession`; после принятия запрос не дополняется новой revision или новым
-состоянием MR.
+Discussions не входят в admission input. Код фиксируется diff refs, а актуальный MR-контекст и
+discussions агент читает через `glab` в read-only режиме. Перед публикацией connector независимо
+загружает свежие discussions и проверяет diff fingerprint.
+
+Затем connector вычисляет fingerprints, создаёт artifacts path и рендерит prompt. Control-plane
+данные session фиксируются одним `CreateSession`; после принятия запрос не дополняется новой revision
+или новым состоянием MR.
 
 ### 7.4. Orpheus request
 
@@ -528,8 +530,7 @@ connector-а. Рекомендуемый логический состав:
   "review": {
     "diff_fingerprint": "...",
     "review_fingerprint": "...",
-    "artifacts_path": ".orpheus/reviews/<diff-fingerprint>",
-    "trigger": "reviewer_assigned"
+    "artifacts_path": ".orpheus/reviews/<diff-fingerprint>"
   },
   "diff_refs": {
     "base_sha": "...",
@@ -1127,6 +1128,12 @@ lock для всех race conditions.
 5. даёт только уже начатым внешним HTTP calls закончиться в короткий bounded timeout;
 6. завершает процесс.
 
+Каждый долгоживущий компонент connector-а реализует lifecycle `Run(app_context)` /
+`Stop(shutdown_context)`. `Run` прекращает создавать новую работу после отмены общего application
+context. Затем supervisor параллельно вызывает `Stop` у всех компонентов с одним context,
+ограниченным `SHUTDOWN_TIMEOUT_SECONDS`; компонент использует его deadline, чтобы дождаться уже
+начатой внешней операции или принудительно отменить её.
+
 Новая версия после старта восстанавливает sessions из Orpheus и publication state из GitLab markers.
 Благодаря этому recreate не обрывает дорогой анализ и не требует держать старый pod до окончания VM.
 
@@ -1547,7 +1554,7 @@ versioned publication protocol. GitLab markers и Orpheus metadata/HookResult в
 
 ```text
 назначение reviewer
-  → frozen input snapshot
+  → frozen control-plane review input
   → atomic one-shot Orpheus session
   → pinned analysis в новой AgentBox VM
   → deterministic validation/packing в after_run
