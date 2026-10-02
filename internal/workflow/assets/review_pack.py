@@ -66,7 +66,7 @@ def parse_scalar(value):
     return value
 
 
-def parse_markdown(path, required):
+def parse_markdown(path, required, optional=None):
     text = read_text(path)
     lines = text.split("\n")
     if not lines or lines[0] != "---":
@@ -76,6 +76,7 @@ def parse_markdown(path, required):
     except ValueError as error:
         raise InvalidArtifacts(f"unterminated front matter: {path.name}") from error
     fields = {}
+    allowed = required | (optional or set())
     for line in lines[1:closing]:
         if not line.strip() or ":" not in line:
             raise InvalidArtifacts(f"invalid front matter line: {path.name}")
@@ -83,7 +84,7 @@ def parse_markdown(path, required):
         key = key.strip()
         if key in fields:
             raise InvalidArtifacts(f"duplicate front matter field: {key}")
-        if key not in required:
+        if key not in allowed:
             raise InvalidArtifacts(f"unknown front matter field: {key}")
         fields[key] = parse_scalar(value)
     missing = set(required) - set(fields)
@@ -132,27 +133,42 @@ def clean_repository_path(value):
 def parse_findings(directory):
     findings = []
     required = {"id", "path", "line", "severity", "title", "source"}
+    previous_fields = {
+        "previous_discussion_id",
+        "previous_note_id",
+        "previous_marker",
+        "recurrence_comment",
+    }
     for artifact in list_files(directory):
         if not FINDING_NAME.fullmatch(artifact.name):
             raise InvalidArtifacts(f"invalid finding filename: {artifact.name}")
-        fields, body = parse_markdown(artifact, required)
+        fields, body = parse_markdown(artifact, required, previous_fields)
         finding_id = nonempty(fields["id"], "id")
         if artifact.stem != finding_id:
             raise InvalidArtifacts(f"finding filename does not match id: {artifact.name}")
         severity = nonempty(fields["severity"], "severity")
         if severity not in SEVERITIES:
             raise InvalidArtifacts(f"invalid finding severity: {artifact.name}")
-        findings.append(
-            {
-                "id": finding_id,
-                "path": clean_repository_path(fields["path"]),
-                "line": parse_int(fields["line"], "line"),
-                "severity": severity,
-                "title": nonempty(fields["title"], "title"),
-                "source": nonempty(fields["source"], "source"),
-                "body": body,
+        finding = {
+            "id": finding_id,
+            "path": clean_repository_path(fields["path"]),
+            "line": parse_int(fields["line"], "line"),
+            "severity": severity,
+            "title": nonempty(fields["title"], "title"),
+            "source": nonempty(fields["source"], "source"),
+            "body": body,
+        }
+        supplied_previous = previous_fields.intersection(fields)
+        if supplied_previous and supplied_previous != previous_fields:
+            raise InvalidArtifacts(f"incomplete previous finding reference: {artifact.name}")
+        if supplied_previous:
+            finding["previous"] = {
+                "discussion_id": nonempty(fields["previous_discussion_id"], "previous_discussion_id"),
+                "note_id": parse_int(fields["previous_note_id"], "previous_note_id"),
+                "marker": nonempty(fields["previous_marker"], "previous_marker"),
+                "recurrence_comment": nonempty(fields["recurrence_comment"], "recurrence_comment"),
             }
-        )
+        findings.append(finding)
     return findings
 
 

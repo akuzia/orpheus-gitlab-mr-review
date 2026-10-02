@@ -11,6 +11,7 @@ import (
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/gitlab"
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/observability"
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/orpheus"
+	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/publication"
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/review"
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/workflow"
 
@@ -81,6 +82,7 @@ func New(cfg config.Config) (*App, error) {
 			WorkerCount:   cfg.ReconcileWorkerCount,
 			QueueCapacity: cfg.ReconcileQueueCapacity,
 			MaxConcurrent: cfg.MaxConcurrentReviews,
+			Publisher:     publication.New(logger, gitLabClient, cfg.GitLab.BaseURL),
 		},
 	)
 	watcher := connector.NewWatcher(logger, gitLabClient, reconciler, connector.WatcherConfig{

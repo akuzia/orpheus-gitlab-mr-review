@@ -38,3 +38,14 @@ requests. Before admission, the reconciler restores active workflow sessions fro
 compares them with current GitLab state. A transient read error prevents all creates for that tick.
 `MAX_CONCURRENT_REVIEWS` bounds active Orpheus review sessions; excess candidates remain assigned and
 are reconsidered on the next poll.
+
+Completed runs are published idempotently from the validated `after_run` bundle. Findings,
+recommendations, recurrence replies, and the completion note use bot-owned trailing markers. The
+connector checks the current diff before every mutation and removes only its own reviewer after the
+completion marker is visible. Publication resumes from GitLab markers after a retry or restart.
+
+Recurring findings carry an explicit reference to the previous bot-owned discussion. An open thread
+is retained, a thread marked by GitLab as `resolved_by_push` is replaced at the current diff
+position, and an explicitly human-resolved thread receives a finding-specific reply before it is
+reopened. If GitLab does not expose the resolution origin, publication fails closed instead of
+guessing.

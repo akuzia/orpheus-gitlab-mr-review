@@ -51,6 +51,20 @@ type gitLabReviewSourceStub struct {
 	calls int
 }
 
+type reviewPublisherStub struct {
+	calls  int
+	input  review.Input
+	bundle protocol.Bundle
+	err    error
+}
+
+func (s *reviewPublisherStub) Publish(_ context.Context, input review.Input, bundle protocol.Bundle) error {
+	s.calls++
+	s.input = input
+	s.bundle = bundle
+	return s.err
+}
+
 func (s *gitLabReviewSourceStub) GetReviewInput(context.Context, int64, int64) (gitlab.ReviewInput, error) {
 	s.calls++
 	return s.input, s.err
@@ -248,17 +262,21 @@ func TestReconcilerValidatesCompletedBundleAgainstImmutableMetadata(t *testing.T
 		},
 	}
 	core, logs := observer.New(zap.DebugLevel)
+	publisher := &reviewPublisherStub{}
 	reconciler := NewReconciler(zap.New(core), nil, client, func(review.Input) (workflow.SessionContract, error) {
 		t.Fatal("completed session must not build a new contract")
 		return workflow.SessionContract{}, nil
-	})
+	}, ReconcilerConfig{Publisher: publisher})
 
 	err = reconciler.Reconcile(context.Background(), input)
 
 	require.NoError(t, err)
 	require.Equal(t, 1, client.metadataCalls)
 	require.Zero(t, client.createCalls)
-	require.Equal(t, 1, logs.FilterMessage("validated Orpheus review bundle").Len())
+	require.Equal(t, 1, publisher.calls)
+	require.Equal(t, input, publisher.input)
+	require.Equal(t, bundle, publisher.bundle)
+	require.Equal(t, 1, logs.FilterMessage("completed GitLab review publication").Len())
 }
 
 func TestReconcilerRejectsCompletedRunWithoutSuccessfulAgentAndHook(t *testing.T) {

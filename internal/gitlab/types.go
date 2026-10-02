@@ -49,20 +49,48 @@ type Position struct {
 	OldLine      int64
 }
 
+type DiffFile struct {
+	OldPath     string
+	NewPath     string
+	Diff        string
+	NewFile     bool
+	RenamedFile bool
+	DeletedFile bool
+	Collapsed   bool
+	TooLarge    bool
+}
+
+type ResolutionCause string
+
+const (
+	ResolutionCauseNone           ResolutionCause = ""
+	ResolutionCauseExplicit       ResolutionCause = "explicit"
+	ResolutionCauseOutdatedByPush ResolutionCause = "outdated_by_push"
+	ResolutionCauseUnknown        ResolutionCause = "unknown"
+)
+
 type Note struct {
-	ID         int64
-	Body       string
-	Author     User
-	System     bool
-	Resolvable bool
-	Resolved   bool
-	Position   *Position
+	ID             int64
+	Body           string
+	Author         User
+	System         bool
+	Resolvable     bool
+	Resolved       bool
+	ResolvedAt     *time.Time
+	ResolvedBy     User
+	ResolvedByPush bool
+	Position       *Position
 }
 
 type Discussion struct {
-	ID             string
-	IndividualNote bool
-	Notes          []Note
+	ID              string
+	IndividualNote  bool
+	Resolvable      bool
+	Resolved        bool
+	ResolutionCause ResolutionCause
+	ResolvedAt      *time.Time
+	ResolvedBy      User
+	Notes           []Note
 }
 
 type ReviewInput struct {

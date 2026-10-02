@@ -321,6 +321,10 @@ line: 3
 severity: warning
 title: Example finding
 source: test policy
+previous_discussion_id: old-discussion
+previous_note_id: 123
+previous_marker: "<!-- orpheus-review-finding:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->"
+recurrence_comment: "The guard is still missing on the same parser path."
 ---
 
 The changed behavior needs an explicit guard.
@@ -335,6 +339,8 @@ The changed behavior needs an explicit guard.
 	bundle, err := protocol.Decode(output, protocol.DefaultLimits(), protocolExpected(contract.Metadata))
 	require.NoError(t, err)
 	require.Equal(t, "F-0001", bundle.Confirmed[0].ID)
+	require.Equal(t, "old-discussion", bundle.Confirmed[0].Previous.DiscussionID)
+	require.Equal(t, "The guard is still missing on the same parser path.", bundle.Confirmed[0].Previous.RecurrenceComment)
 }
 
 func TestEmbeddedPromptOwnsCoreOperatingContractAndIsEnglish(t *testing.T) {

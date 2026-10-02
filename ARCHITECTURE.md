@@ -825,7 +825,13 @@ Rejected artifacts валидируются локально настолько,
       "severity": "warning",
       "title": "Неполная проверка",
       "source": "AGENTS.md",
-      "body": "..."
+      "body": "...",
+      "previous": {
+        "discussion_id": "discussion-id",
+        "note_id": 123,
+        "marker": "<!-- orpheus-review-finding:... -->",
+        "recurrence_comment": "Specific evidence that the same cause still reproduces."
+      }
     }
   ],
   "recommendations": [],
@@ -978,7 +984,36 @@ Finding hash строится из versioned normalized набора как ми
 Формат marker-а версионируется, если меняется нормализация. Старые поддерживаемые markers должны
 распознаваться при reconciliation in-flight reviews.
 
-### 12.4. Inline fallback
+### 12.4. Повторно подтверждённые findings
+
+Если агент подтвердил, что собственный finding предыдущего review всё ещё воспроизводится, bundle
+содержит ссылку на исходные `discussion_id`, `note_id`, точный trailing marker и отдельный
+содержательный `recurrence_comment`. Connector независимо проверяет author ID, marker и совпадение
+идентификаторов. Неподтверждённая ссылка является publication error и не даёт права менять thread.
+
+После проверки применяется состояние исходной discussion:
+
+- открытая discussion уже представляет finding: новый thread и reply не создаются;
+- discussion, автоматически закрытая GitLab как outdated при push, остаётся закрытой, а connector
+  создаёт новый resolvable thread на актуальной позиции текущего diff;
+- discussion, явно закрытая пользователем через Resolve, получает один идемпотентный содержательный
+  reply текущего review и переоткрывается;
+- неизвестный источник resolution не интерпретируется эвристикой по тексту: publication безопасно
+  останавливается;
+- finding, который исправлен либо закрыт пользователем с принятием риска/обоснованным отклонением,
+  не входит в `confirmed` нового bundle и не переоткрывается.
+
+Источник resolution определяется по структурированным полям GitLab discussion/note:
+`resolved_by_push`, `resolved_by`, `resolved_at` и `resolved`. Тексты system notes могут использоваться
+как дополнительный контекст для агента, но connector не распознаёт способ закрытия по локализованной
+строке. Если используемая версия/endpoint GitLab не возвращает `resolved_by_push`, наличие
+`resolved_by` недостаточно: push-resolution также сохраняет пользователя, выполнившего push.
+Такое состояние классифицируется как unknown и публикация останавливается до появления надёжного
+структурированного признака, а не переоткрывает или дублирует thread наугад. Это исключает смысловой дубль и не позволяет автоматически закрытому outdated-thread
+исчезнуть из completion count. Completion count равен числу confirmed findings текущего bundle,
+включая связанные открытые или переоткрытые findings ровно по одному разу.
+
+### 12.5. Inline fallback
 
 Если connector доказал, что inline position невалидна — path отсутствует в diff, line нельзя
 однозначно сопоставить hunk или GitLab вернул подтверждённую invalid-position ошибку — finding
@@ -988,7 +1023,7 @@ fallback и тот же idempotency marker.
 Fallback не применяется к authorization, validation или неизвестной 4xx ошибке. Нельзя маскировать
 ошибку API как invalid position.
 
-### 12.5. Completion
+### 12.6. Completion
 
 При нуле замечаний completion note сообщает, что текущая версия MR проверена и замечаний не найдено.
 При наличии замечаний указывается их число. В обоих случаях явно говорится, что автоматическое

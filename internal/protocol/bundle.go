@@ -71,13 +71,24 @@ type Counts struct {
 }
 
 type Finding struct {
-	ID       string `json:"id"`
-	Path     string `json:"path"`
-	Line     int    `json:"line"`
-	Severity string `json:"severity"`
-	Title    string `json:"title"`
-	Source   string `json:"source"`
-	Body     string `json:"body"`
+	ID       string           `json:"id"`
+	Path     string           `json:"path"`
+	Line     int              `json:"line"`
+	Severity string           `json:"severity"`
+	Title    string           `json:"title"`
+	Source   string           `json:"source"`
+	Body     string           `json:"body"`
+	Previous *PreviousFinding `json:"previous,omitempty"`
+}
+
+// PreviousFinding links a recurring finding to the exact Orpheus note which
+// published it in an earlier review. Publication verifies the author, marker,
+// and discussion state against a fresh GitLab snapshot before trusting it.
+type PreviousFinding struct {
+	DiscussionID      string `json:"discussion_id"`
+	NoteID            int64  `json:"note_id"`
+	Marker            string `json:"marker"`
+	RecurrenceComment string `json:"recurrence_comment"`
 }
 
 type Recommendation struct {
@@ -312,6 +323,14 @@ func validateFinding(finding Finding, limits Limits, seen map[string]struct{}) e
 	if !validText(finding.Title, limits.MaxFieldBytes) || !validText(finding.Source, limits.MaxFieldBytes) ||
 		!validText(finding.Body, limits.MaxBodyBytes) {
 		return invalid("invalid_finding_content", nil)
+	}
+	if finding.Previous != nil {
+		previous := finding.Previous
+		if !validText(previous.DiscussionID, limits.MaxFieldBytes) || previous.NoteID <= 0 ||
+			!validText(previous.Marker, limits.MaxFieldBytes) ||
+			!validText(previous.RecurrenceComment, limits.MaxBodyBytes) {
+			return invalid("invalid_previous_finding", nil)
+		}
 	}
 
 	return nil

@@ -13,6 +13,7 @@ import (
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/gitlab"
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/orpheus"
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/protocol"
+	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/publication"
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/review"
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/workflow"
 
@@ -43,6 +44,10 @@ type gitLabReviewSource interface {
 
 type SessionContractBuilder func(input review.Input) (workflow.SessionContract, error)
 
+type ReviewPublisher interface {
+	Publish(ctx context.Context, input review.Input, bundle protocol.Bundle) error
+}
+
 var (
 	ErrReconcilerStopping = errors.New("review reconciler is stopping")
 	ErrReconcileQueueFull = errors.New("review reconcile queue is full")
@@ -52,6 +57,7 @@ type ReconcilerConfig struct {
 	WorkerCount   int
 	QueueCapacity int
 	MaxConcurrent int
+	Publisher     ReviewPublisher
 }
 
 type LifecyclePhase string
@@ -64,6 +70,7 @@ const (
 	LifecyclePhaseCancel  LifecyclePhase = "cancel_run"
 	LifecyclePhaseRecover LifecyclePhase = "recover_sessions"
 	LifecyclePhaseGitLab  LifecyclePhase = "fetch_gitlab_state"
+	LifecyclePhasePublish LifecyclePhase = "publish_review"
 )
 
 type LifecycleError struct {
@@ -92,6 +99,7 @@ type Reconciler struct {
 	gitlab         gitLabReviewSource
 	orpheus        orpheusAdapter
 	buildContract  SessionContractBuilder
+	publisher      ReviewPublisher
 	workerCount    int
 	maxConcurrent  int
 	queue          chan review.Snapshot
@@ -132,6 +140,7 @@ func NewReconciler(
 		gitlab:        gitLabClient,
 		orpheus:       client,
 		buildContract: buildContract,
+		publisher:     cfg.Publisher,
 		workerCount:   cfg.WorkerCount,
 		maxConcurrent: cfg.MaxConcurrent,
 		queue:         make(chan review.Snapshot, cfg.QueueCapacity),
@@ -588,10 +597,19 @@ func (r *Reconciler) reconcileSession(ctx context.Context, input review.Input, s
 			zap.Int("recommendations", bundle.Counts.Recommendations),
 			zap.Int("resolutions", bundle.Counts.Resolutions),
 		)
-		// Publication is a separate idempotent adapter. Until it is wired, the
-		// validated bundle remains in Orpheus and is never converted into a new
-		// analysis run.
-		r.logger.Info("validated Orpheus review bundle", fields...)
+		if r.publisher == nil {
+			r.logger.Info("validated Orpheus review bundle", fields...)
+			return nil
+		}
+		if err := r.publisher.Publish(ctx, input, bundle); err != nil {
+			return lifecycleError(
+				LifecyclePhasePublish,
+				publication.Code(err),
+				publication.IsRetryable(err),
+				err,
+			)
+		}
+		r.logger.Info("completed GitLab review publication", fields...)
 	case "failed":
 		fields = append(fields, zap.String("orpheus_error_code", session.ErrorCode))
 		r.logger.Warn("Orpheus review session failed without analysis retry", fields...)

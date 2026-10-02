@@ -80,6 +80,18 @@ A self-contained explanation of the problem, evidence, checks performed, and the
 Every finding requires a unique `id`, a repository-relative `path`, a positive line number in the
 new version, `severity` (`info`, `warning`, or `error`), `title`, `source`, and a non-empty body.
 
+If a confirmed finding is the same issue as an Orpheus finding from an earlier review, add all four
+fields below to its front matter. Copy the discussion, exact note, and exact trailing marker from
+GitLab. Write a concise, finding-specific `recurrence_comment` explaining what you rechecked, why
+the defect still exists, and what still has to be fixed. Do not use a stock sentence.
+
+```md
+previous_discussion_id: discussion-id
+previous_note_id: 123
+previous_marker: "<!-- orpheus-review-finding:... -->"
+recurrence_comment: "The nil path is still reachable from ParseConfig; guard the lookup before dereferencing it."
+```
+
 After the initial analysis, verify every finding again against the pinned diff and surrounding code.
 Then atomically move it to `confirmed/` if the issue is valid, or to `rejected/` if it is not. Add the
 exact rejection reason to every rejected finding. `findings/` must be empty before successful
@@ -107,9 +119,19 @@ the current diff.
 
 ## Existing discussions
 
-Use discussions read through `glab` to deduplicate findings and verify previous findings. Do not
-reply in GitLab, duplicate an existing reproducible Orpheus finding, or resolve another author's
-discussion.
+Use discussions read through `glab` to verify previous findings. For every previous Orpheus finding:
+
+- If it still reproduces, create a confirmed finding at its current diff position and include the
+  complete previous-finding reference above. Do this whether the old thread is open, manually
+  resolved, or automatically made outdated. The connector decides whether to retain, reopen, or
+  replace that thread without creating a semantic duplicate.
+- If it was explicitly resolved by a person with an explanation that accepts the risk or rejects
+  the finding, do not recreate or reopen it unless new evidence makes it a materially different
+  defect.
+- If its cause is fixed, create a resolution intent only when the thread is still open.
+
+Do not reply in GitLab or mutate discussions yourself. Never claim a previous marker that is not an
+exact trailing marker on a note authored by the configured reviewer account.
 
 ## Completion
 

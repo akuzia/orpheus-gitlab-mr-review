@@ -78,6 +78,12 @@ func TestValidateRejectsUnsafeOrInconsistentBundle(t *testing.T) {
 			change: func(bundle *Bundle) { bundle.Counts.Rejected = -1 },
 			code:   "count_mismatch",
 		},
+		"incomplete previous finding": {
+			change: func(bundle *Bundle) {
+				bundle.Confirmed[0].Previous = &PreviousFinding{DiscussionID: "discussion-1"}
+			},
+			code: "invalid_previous_finding",
+		},
 	}
 
 	for name, test := range tests {
