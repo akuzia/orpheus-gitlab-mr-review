@@ -149,6 +149,27 @@ Connector владеет всей GitLab-специфичной оркестра
 - выполняет lifecycle retries внешних операций;
 - восстанавливает работу после рестарта, используя Orpheus и GitLab.
 
+Внутри connector-а ответственность разделена явно: `Watcher` только выполняет polling GitLab,
+загружает control-plane данные и передаёт полный `review.Snapshot`; `Reconciler` проверяет
+eligibility и владеет всем дальнейшим Orpheus/GitLab lifecycle для inputs этого snapshot.
+
+`Watcher` и `Reconciler` являются независимыми `Run(ctx)/Stop(ctx)` services и работают параллельно.
+Они связаны bounded in-memory channel, которым владеет `Reconciler`: `Watcher` выполняет только
+неблокирующий submit и никогда не ждёт Orpheus HTTP request. Snapshot публикуется только после
+полностью успешного list/fetch цикла; частичный результат не может выглядеть как удаление reviewer.
+Snapshots обрабатываются последовательно, а разные MR внутри одного snapshot — ограниченным worker
+pool размером `RECONCILE_WORKER_COUNT`. Сравнение двух последовательных полных snapshots обнаруживает
+MR, исчезнувшие из reviewer selection, и запускает для их exact session идемпотентный `CancelRun`.
+При заполненной очереди snapshot не блокирует polling и будет собран заново следующим poll;
+`RECONCILE_QUEUE_CAPACITY` ограничивает число ожидающих snapshots. Это не подменяет
+`MAX_CONCURRENT_REVIEWS`: последний ограничивает число активных Orpheus sessions, а не число коротких
+reconciliation calls.
+
+При graceful shutdown новые snapshots больше не принимаются, уже принятая очередь дренируется, а
+активные Orpheus requests получают shutdown deadline. Analysis retries из этой очереди не создаются:
+повторный submit после временной ошибки происходит только через новый GitLab poll и снова начинает
+с проверки durable Orpheus state.
+
 Connector **не**:
 
 - запускает Codex локально;
@@ -309,9 +330,9 @@ Live MR-контекст, который агент читает через `gla
 
 ### 5.4. Workflow revision
 
-Workflow revision вычисляется connector-ом из семантических embedded assets, включая как минимум:
+Workflow revision вычисляется connector-ом из семантических assets, включая как минимум:
 
-- developer instructions;
+- объединённые внешние developer instructions;
 - MR prompt template;
 - helper bytes;
 - artifact/bundle schema и renderer logic version.
@@ -339,11 +360,10 @@ Revision сохраняется в metadata и bundle. Оператор не з�
 Статические semantic assets встраиваются через `embed.FS` либо хранятся строковыми константами, если
 это не ухудшает читаемость:
 
-- developer instructions, перенесённые из metal;
 - `merge_request.md` template, перенесённый из metal;
 - исходный или готовый payload helper-а;
 - bootstrap shell scripts для `before_run` и `after_run`;
-- JSON schema versions и marker format versions.
+- schema version constants и marker format versions.
 
 Шаблон сохраняется отдельным embedded asset. Его загрузка, строгая проверка контекста и rendering
 выполняются Go-кодом connector-а. Отсутствующее поле, неверный тип или ошибка template execution
@@ -351,17 +371,23 @@ Revision сохраняется в metadata и bundle. Оператор не з�
 
 ### 6.2. Developer instructions
 
-Metal instructions переносятся по смыслу и адаптируются к новой границе:
+Connector-owned MR prompt встроен в бинарник и хранится только на английском языке. В него по смыслу
+перенесён обязательный контракт metal workflow:
 
 - unattended execution, без вопросов пользователю;
 - работа только в выделенном workspace;
 - проверка только pinned diff;
 - обязательный файловый контракт findings/confirmed/rejected/recommendations/resolutions;
 - использование существующих discussions для дедупликации и resolution intents;
-- правила Kubernetes compliance skills;
 - запрет GitLab mutations;
 - финальный ответ не является каналом публикации;
 - после агента artifacts проверяет helper, а публикует connector.
+
+Developer instructions не встроены. Пользователь предоставляет один или несколько примонтированных
+Markdown-файлов на английском языке с Kubernetes compliance и project-specific правилами. Файлы
+читаются один раз на старте в явно заданном порядке, должны быть непустыми и объединяются без
+интерпретации их содержимого. Итоговый текст передаётся Orpheus как agent instructions и входит в
+`workflow_revision`; изменение любого файла создаёт новую revision. Live reload не поддерживается.
 
 Из metal-текста удаляется предположение, что локальный runtime сам читает workspace после run, и
 упоминание analysis retry. Невалидный или незавершённый результат теперь завершает workflow ошибкой;
@@ -383,11 +409,14 @@ deployment-конфигурацией и пользовательской док
 | `ORPHEUS_WEB_URL` | да | публичный base URL для диагностических ссылок в MR |
 | `GITLAB_BASE_URL` | да | base URL обслуживаемой GitLab installation |
 | `GITLAB_TOKEN` | да | credential authenticated bot-а; до 1.0 также может передаваться sandbox для read-only работы |
+| `ORPHEUS_AGENT_INSTRUCTION_FILES` | да | упорядоченный список путей к примонтированным `.md` developer instructions |
 | `ORPHEUS_AGENT_PROFILE` | да | профиль авторизации/исполнения агента |
 | `ORPHEUS_SANDBOX_TEMPLATE` | да | AgentBox template |
 | `ORPHEUS_AGENT_MODEL` | нет | явный model override; отсутствие использует policy профиля/Orpheus |
 | `POLL_INTERVAL_SECONDS` | нет | период polling в секундах |
 | `MAX_CONCURRENT_REVIEWS` | нет | локальный предел одновременно активных sessions |
+| `RECONCILE_WORKER_COUNT` | нет | число параллельных коротких reconciliation calls |
+| `RECONCILE_QUEUE_CAPACITY` | нет | bounded capacity очереди полных poll snapshots между Watcher и Reconciler |
 | `RUN_TIMEOUT_SECONDS` | нет | deadline одного Orpheus run в секундах |
 | `HOOK_TIMEOUT_SECONDS` | нет | deadline каждого hook в секундах |
 | `HTTP_TIMEOUT_SECONDS` | нет | deadline одиночного GitLab/Orpheus request в секундах |
@@ -482,7 +511,7 @@ configuration:
   agent:
     profile: <configured-profile>
     model: <optional-configured-model>
-    instructions: <embedded-developer-instructions>
+    instructions: <mounted-developer-instructions>
   sandbox:
     template: <configured-template>
   hooks:
@@ -1169,7 +1198,7 @@ context. Затем supervisor параллельно вызывает `Stop` у
 
 Целевая граница требует, чтобы GitLab mutations выполнял только connector. Однако на первом этапе
 агенту может быть доступен credential и `glab` для read-only проверок, а запрет mutations задаётся
-только developer instructions.
+только встроенным MR prompt.
 
 Это **не является технической security boundary**: ошибившийся или скомпрометированный агент
 теоретически может выполнить mutation с доступным token.

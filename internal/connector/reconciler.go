@@ -1,0 +1,608 @@
+package connector
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"sync"
+
+	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/orpheus"
+	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/protocol"
+	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/review"
+	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/workflow"
+
+	"go.uber.org/zap"
+)
+
+type orpheusAdapter interface {
+	FindSessions(ctx context.Context, key orpheus.ReviewSessionKey) ([]orpheus.Session, error)
+	CancelRun(ctx context.Context, sessionID, runID string) error
+	CreateSession(
+		ctx context.Context,
+		key orpheus.ReviewSessionKey,
+		reviewerID int64,
+		request orpheus.CreateSessionRequest,
+	) (orpheus.Accepted, error)
+	FindMessageMetadata(
+		ctx context.Context,
+		sessionID string,
+		runID string,
+		externalKey string,
+	) (json.RawMessage, error)
+}
+
+type SessionContractBuilder func(input review.Input) (workflow.SessionContract, error)
+
+var (
+	ErrReconcilerStopping = errors.New("review reconciler is stopping")
+	ErrReconcileQueueFull = errors.New("review reconcile queue is full")
+)
+
+type ReconcilerConfig struct {
+	WorkerCount   int
+	QueueCapacity int
+}
+
+type LifecyclePhase string
+
+const (
+	LifecyclePhaseFind   LifecyclePhase = "find_session"
+	LifecyclePhaseBuild  LifecyclePhase = "build_session_contract"
+	LifecyclePhaseCreate LifecyclePhase = "create_session"
+	LifecyclePhaseRead   LifecyclePhase = "read_session_result"
+	LifecyclePhaseCancel LifecyclePhase = "cancel_run"
+)
+
+type LifecycleError struct {
+	Phase     LifecyclePhase
+	Code      string
+	Retryable bool
+	Err       error
+}
+
+func (e *LifecycleError) Error() string {
+	return fmt.Sprintf("Orpheus lifecycle %s failed (%s): %v", e.Phase, e.Code, e.Err)
+}
+
+func (e *LifecycleError) Unwrap() error { return e.Err }
+
+func IsRetryable(err error) bool {
+	var lifecycleError *LifecycleError
+	return errors.As(err, &lifecycleError) && lifecycleError.Retryable
+}
+
+// Reconciler owns snapshot comparison, eligibility, admission, and Orpheus
+// lifecycle decisions for fetched review inputs. Polling remains the watcher's
+// only responsibility.
+type Reconciler struct {
+	logger         *zap.Logger
+	orpheus        orpheusAdapter
+	buildContract  SessionContractBuilder
+	workerCount    int
+	queue          chan review.Snapshot
+	stateMu        sync.Mutex
+	stopping       bool
+	runCalled      bool
+	stopOnce       sync.Once
+	stop           chan struct{}
+	started        chan struct{}
+	done           chan struct{}
+	cancelMu       sync.Mutex
+	cancelRequests context.CancelFunc
+	previous       map[string]review.Input
+	removed        map[string]review.Input
+}
+
+func NewReconciler(
+	logger *zap.Logger,
+	client orpheusAdapter,
+	buildContract SessionContractBuilder,
+	configs ...ReconcilerConfig,
+) *Reconciler {
+	cfg := ReconcilerConfig{WorkerCount: 1, QueueCapacity: 4}
+	if len(configs) > 0 {
+		cfg = configs[0]
+	}
+	if cfg.WorkerCount <= 0 {
+		cfg.WorkerCount = 1
+	}
+	if cfg.QueueCapacity <= 0 {
+		cfg.QueueCapacity = cfg.WorkerCount
+	}
+
+	return &Reconciler{
+		logger:        logger,
+		orpheus:       client,
+		buildContract: buildContract,
+		workerCount:   cfg.WorkerCount,
+		queue:         make(chan review.Snapshot, cfg.QueueCapacity),
+		stop:          make(chan struct{}),
+		started:       make(chan struct{}),
+		done:          make(chan struct{}),
+		previous:      make(map[string]review.Input),
+		removed:       make(map[string]review.Input),
+	}
+}
+
+func (r *Reconciler) Submit(ctx context.Context, snapshot review.Snapshot) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	copyOfSnapshot := review.Snapshot{Inputs: append([]review.Input(nil), snapshot.Inputs...)}
+	seen := make(map[string]struct{}, len(copyOfSnapshot.Inputs))
+	for _, input := range copyOfSnapshot.Inputs {
+		if input.MRKey == "" {
+			return errors.New("submit review snapshot: merge request key is required")
+		}
+		if _, exists := seen[input.MRKey]; exists {
+			return fmt.Errorf("submit review snapshot: duplicate merge request key %q", input.MRKey)
+		}
+		seen[input.MRKey] = struct{}{}
+	}
+
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
+	if r.stopping {
+		return ErrReconcilerStopping
+	}
+	select {
+	case r.queue <- copyOfSnapshot:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return ErrReconcileQueueFull
+	}
+}
+
+func (r *Reconciler) Run(ctx context.Context) error {
+	r.stateMu.Lock()
+	if r.runCalled {
+		r.stateMu.Unlock()
+		return errors.New("review reconciler can only be run once")
+	}
+	r.runCalled = true
+	r.stateMu.Unlock()
+
+	requestCtx, cancelRequests := context.WithCancel(context.WithoutCancel(ctx))
+	r.cancelMu.Lock()
+	r.cancelRequests = cancelRequests
+	r.cancelMu.Unlock()
+	close(r.started)
+	defer close(r.done)
+	defer func() {
+		cancelRequests()
+		r.cancelMu.Lock()
+		r.cancelRequests = nil
+		r.cancelMu.Unlock()
+	}()
+
+	r.logger.Debug("starting review reconciler",
+		zap.Int("worker_count", r.workerCount),
+		zap.Int("queue_capacity", cap(r.queue)),
+	)
+	r.runSnapshots(requestCtx, ctx)
+
+	return nil
+}
+
+func (r *Reconciler) Stop(ctx context.Context) error {
+	r.logger.Debug("stopping review reconciler")
+	r.beginStop()
+
+	select {
+	case <-r.started:
+	case <-ctx.Done():
+		r.logger.Debug("review reconciler shutdown timed out before start", zap.Error(ctx.Err()))
+		return ctx.Err()
+	}
+
+	select {
+	case <-r.done:
+		r.logger.Debug("review reconciler stopped")
+		return nil
+	case <-ctx.Done():
+		r.logger.Debug("review reconciler shutdown timed out; cancelling active requests", zap.Error(ctx.Err()))
+		r.cancelMu.Lock()
+		cancelRequests := r.cancelRequests
+		r.cancelMu.Unlock()
+		if cancelRequests != nil {
+			cancelRequests()
+		}
+		return ctx.Err()
+	}
+}
+
+func (r *Reconciler) beginStop() {
+	r.stopOnce.Do(func() {
+		r.stateMu.Lock()
+		r.stopping = true
+		r.stateMu.Unlock()
+		close(r.stop)
+	})
+}
+
+func (r *Reconciler) runSnapshots(requestCtx, appCtx context.Context) {
+	for {
+		select {
+		case snapshot := <-r.queue:
+			r.processSnapshot(requestCtx, snapshot)
+		case <-appCtx.Done():
+			r.beginStop()
+			r.drainSnapshots(requestCtx)
+			return
+		case <-r.stop:
+			r.drainSnapshots(requestCtx)
+			return
+		}
+	}
+}
+
+func (r *Reconciler) drainSnapshots(ctx context.Context) {
+	for {
+		select {
+		case snapshot := <-r.queue:
+			r.processSnapshot(ctx, snapshot)
+		default:
+			return
+		}
+	}
+}
+
+type snapshotTask struct {
+	input   review.Input
+	removed bool
+}
+
+type snapshotResult struct {
+	task snapshotTask
+	err  error
+}
+
+func (r *Reconciler) processSnapshot(ctx context.Context, snapshot review.Snapshot) {
+	current := make(map[string]review.Input, len(snapshot.Inputs))
+	tasks := make([]snapshotTask, 0, len(snapshot.Inputs)+len(r.removed))
+	for _, input := range snapshot.Inputs {
+		current[input.MRKey] = input
+		delete(r.removed, input.MRKey)
+		tasks = append(tasks, snapshotTask{input: input})
+	}
+	for key, input := range r.previous {
+		if _, exists := current[key]; !exists {
+			r.removed[key] = input
+		}
+	}
+	for _, input := range r.removed {
+		tasks = append(tasks, snapshotTask{input: input, removed: true})
+	}
+	r.previous = current
+
+	results := r.runSnapshotTasks(ctx, tasks)
+	for _, result := range results {
+		if !result.task.removed {
+			continue
+		}
+		if result.err == nil || !IsRetryable(result.err) {
+			delete(r.removed, result.task.input.MRKey)
+		}
+	}
+}
+
+func (r *Reconciler) runSnapshotTasks(ctx context.Context, tasks []snapshotTask) []snapshotResult {
+	if len(tasks) == 0 {
+		return nil
+	}
+	workerCount := min(r.workerCount, len(tasks))
+	jobs := make(chan snapshotTask)
+	results := make(chan snapshotResult, len(tasks))
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for workerID := range workerCount {
+		go func() {
+			defer workers.Done()
+			for task := range jobs {
+				results <- snapshotResult{task: task, err: r.processTask(ctx, task, workerID)}
+			}
+		}()
+	}
+	for _, task := range tasks {
+		jobs <- task
+	}
+	close(jobs)
+	workers.Wait()
+	close(results)
+
+	collected := make([]snapshotResult, 0, len(tasks))
+	for result := range results {
+		collected = append(collected, result)
+	}
+	return collected
+}
+
+func (r *Reconciler) processTask(ctx context.Context, task snapshotTask, workerID int) error {
+	operation := "reconcile"
+	var err error
+	if task.removed {
+		operation = "cancel"
+		err = r.CancelRemoved(ctx, task.input)
+	} else {
+		err = r.Reconcile(ctx, task.input)
+	}
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+		r.logger.Debug("review lifecycle operation cancelled during shutdown",
+			zap.Int("worker_id", workerID),
+			zap.String("operation", operation),
+			zap.String("merge_request_key", task.input.MRKey),
+		)
+		return err
+	}
+
+	fields := []zap.Field{
+		zap.Int("worker_id", workerID),
+		zap.String("operation", operation),
+		zap.String("merge_request_key", task.input.MRKey),
+		zap.String("project_path", task.input.Project.PathWithNamespace),
+		zap.Error(err),
+	}
+	var lifecycleError *LifecycleError
+	if errors.As(err, &lifecycleError) {
+		fields = append(fields,
+			zap.String("lifecycle_phase", string(lifecycleError.Phase)),
+			zap.String("lifecycle_error_code", lifecycleError.Code),
+			zap.Bool("retryable", lifecycleError.Retryable),
+		)
+	}
+	r.logger.Error("failed to process GitLab review lifecycle", fields...)
+	return err
+}
+
+// CancelRemoved cancels an unfinished review whose MR disappeared between two
+// complete GitLab snapshots. The previous immutable input is sufficient to
+// find the exact one-shot session without creating a new analysis run.
+func (r *Reconciler) CancelRemoved(ctx context.Context, input review.Input) error {
+	key := orpheus.ReviewSessionKey{
+		Namespace:         workflow.ID,
+		MRKey:             input.MRKey,
+		ReviewFingerprint: input.ReviewFingerprint,
+	}
+	sessions, err := r.orpheus.FindSessions(ctx, key)
+	if err != nil {
+		return lifecycleError(LifecyclePhaseFind, lifecycleCode(err), retryable(err), err)
+	}
+	if len(sessions) > 1 {
+		return lifecycleError(LifecyclePhaseRead, "multiple_matching_sessions", false, fmt.Errorf("found %d exact sessions", len(sessions)))
+	}
+	if len(sessions) == 0 {
+		r.logger.Debug("removed GitLab review has no Orpheus session",
+			zap.String("merge_request_key", input.MRKey),
+			zap.String("review_fingerprint", input.ReviewFingerprint),
+		)
+		return nil
+	}
+
+	session := sessions[0]
+	fields := []zap.Field{
+		zap.String("merge_request_key", input.MRKey),
+		zap.String("review_fingerprint", input.ReviewFingerprint),
+		zap.String("session_id", session.ID),
+		zap.String("run_id", session.RunID),
+		zap.String("run_status", session.Status),
+	}
+	switch session.Status {
+	case "accepted", "starting", "running", "finalizing":
+		if err := r.orpheus.CancelRun(ctx, session.ID, session.RunID); err != nil {
+			return lifecycleError(LifecyclePhaseCancel, lifecycleCode(err), retryable(err), err)
+		}
+		r.logger.Info("cancelled Orpheus review after merge request left reviewer snapshot", fields...)
+	case "cancelling", "cancelled":
+		r.logger.Debug("removed GitLab review is already cancelling or cancelled", fields...)
+	case "completed", "failed":
+		// The MR is no longer assigned, so terminal output must not be
+		// published even when completion won the race with cancellation.
+		r.logger.Debug("ignored terminal Orpheus review removed from reviewer snapshot", fields...)
+	default:
+		return lifecycleError(LifecyclePhaseRead, "unknown_run_status", false, fmt.Errorf("unsupported run status %q", session.Status))
+	}
+
+	return nil
+}
+
+func (r *Reconciler) Reconcile(ctx context.Context, input review.Input) error {
+	eligibility := review.EvaluateInputEligibility(input)
+	if !eligibility.Eligible {
+		r.logger.Debug("GitLab merge request is not eligible for review",
+			zap.String("merge_request_key", input.MRKey),
+			zap.String("project_path", input.Project.PathWithNamespace),
+			zap.Strings("reasons", ineligibilityReasons(eligibility.Reasons)),
+		)
+		return nil
+	}
+	if r.orpheus == nil || r.buildContract == nil {
+		return lifecycleError(LifecyclePhaseBuild, "reconciler_not_configured", false, errors.New("Orpheus dependencies are missing"))
+	}
+
+	key := orpheus.ReviewSessionKey{
+		Namespace:         workflow.ID,
+		MRKey:             input.MRKey,
+		ReviewFingerprint: input.ReviewFingerprint,
+	}
+	sessions, err := r.orpheus.FindSessions(ctx, key)
+	if err != nil {
+		return lifecycleError(LifecyclePhaseFind, lifecycleCode(err), retryable(err), err)
+	}
+	if len(sessions) > 1 {
+		return lifecycleError(LifecyclePhaseRead, "multiple_matching_sessions", false, fmt.Errorf("found %d exact sessions", len(sessions)))
+	}
+	if len(sessions) == 1 {
+		return r.reconcileSession(ctx, input, sessions[0])
+	}
+
+	contract, err := r.buildContract(input)
+	if err != nil {
+		code := "invalid_session_contract"
+		var tooLarge *workflow.RequestTooLargeError
+		if errors.As(err, &tooLarge) {
+			code = "session_request_too_large"
+		}
+		return lifecycleError(LifecyclePhaseBuild, code, false, err)
+	}
+	accepted, err := r.orpheus.CreateSession(ctx, contract.Key, contract.ReviewerID, contract.Request)
+	if err != nil {
+		return lifecycleError(LifecyclePhaseCreate, lifecycleCode(err), retryable(err), err)
+	}
+
+	r.logger.Info("created Orpheus review session",
+		zap.String("merge_request_key", input.MRKey),
+		zap.String("review_fingerprint", input.ReviewFingerprint),
+		zap.String("session_id", accepted.SessionID),
+		zap.String("run_id", accepted.RunID),
+	)
+
+	return nil
+}
+
+func (r *Reconciler) reconcileSession(ctx context.Context, input review.Input, session orpheus.Session) error {
+	fields := []zap.Field{
+		zap.String("merge_request_key", input.MRKey),
+		zap.String("review_fingerprint", input.ReviewFingerprint),
+		zap.String("session_id", session.ID),
+		zap.String("run_id", session.RunID),
+		zap.String("run_status", session.Status),
+	}
+
+	switch session.Status {
+	case "accepted", "starting", "running", "cancelling", "finalizing":
+		r.logger.Debug("Orpheus review session is still in progress", fields...)
+	case "completed":
+		bundle, err := r.validateCompletedSession(ctx, input, session)
+		if err != nil {
+			return err
+		}
+		fields = append(fields,
+			zap.Int("confirmed_findings", bundle.Counts.Confirmed),
+			zap.Int("rejected_findings", bundle.Counts.Rejected),
+			zap.Int("recommendations", bundle.Counts.Recommendations),
+			zap.Int("resolutions", bundle.Counts.Resolutions),
+		)
+		// Publication is a separate idempotent adapter. Until it is wired, the
+		// validated bundle remains in Orpheus and is never converted into a new
+		// analysis run.
+		r.logger.Info("validated Orpheus review bundle", fields...)
+	case "failed":
+		fields = append(fields, zap.String("orpheus_error_code", session.ErrorCode))
+		r.logger.Warn("Orpheus review session failed without analysis retry", fields...)
+	case "cancelled":
+		r.logger.Debug("Orpheus review session was cancelled without analysis retry", fields...)
+	default:
+		return lifecycleError(LifecyclePhaseRead, "unknown_run_status", false, fmt.Errorf("unsupported run status %q", session.Status))
+	}
+
+	return nil
+}
+
+func (r *Reconciler) validateCompletedSession(ctx context.Context, input review.Input, session orpheus.Session) (protocol.Bundle, error) {
+	if session.AgentStatus != "completed" {
+		return protocol.Bundle{}, lifecycleError(
+			LifecyclePhaseRead,
+			"agent_not_completed",
+			false,
+			fmt.Errorf("agent status is %q", session.AgentStatus),
+		)
+	}
+
+	var afterRun *orpheus.HookResult
+	for i := range session.Hooks {
+		if session.Hooks[i].Name != "after_run" {
+			continue
+		}
+		if afterRun != nil {
+			return protocol.Bundle{}, lifecycleError(LifecyclePhaseRead, "multiple_after_run_results", false, errors.New("multiple after_run results"))
+		}
+		afterRun = &session.Hooks[i]
+	}
+	if afterRun == nil {
+		return protocol.Bundle{}, lifecycleError(LifecyclePhaseRead, "after_run_missing", false, errors.New("after_run result is missing"))
+	}
+	if afterRun.Status != "completed" || afterRun.ExitCode == nil || *afterRun.ExitCode != 0 {
+		return protocol.Bundle{}, lifecycleError(LifecyclePhaseRead, "after_run_failed", false, fmt.Errorf("after_run status is %q", afterRun.Status))
+	}
+	if afterRun.OutputCompleteness != "complete" || afterRun.TruncationReason != "" || afterRun.OutputType != "text" {
+		return protocol.Bundle{}, lifecycleError(LifecyclePhaseRead, "after_run_output_incomplete", false, errors.New("after_run output is not complete text"))
+	}
+
+	metadataRaw, err := r.orpheus.FindMessageMetadata(
+		ctx,
+		session.ID,
+		session.RunID,
+		workflow.MessageExternalKey(input.ReviewFingerprint),
+	)
+	if err != nil {
+		return protocol.Bundle{}, lifecycleError(LifecyclePhaseRead, lifecycleCode(err), retryable(err), err)
+	}
+	metadata, err := workflow.DecodeMetadata(metadataRaw)
+	if err != nil {
+		return protocol.Bundle{}, lifecycleError(LifecyclePhaseRead, "invalid_session_metadata", false, err)
+	}
+	if err := workflow.ValidateMetadata(metadata, input); err != nil {
+		return protocol.Bundle{}, lifecycleError(LifecyclePhaseRead, "session_metadata_mismatch", false, err)
+	}
+	bundle, err := protocol.Decode([]byte(afterRun.Output), protocol.DefaultLimits(), workflow.ProtocolExpected(metadata))
+	if err != nil {
+		return protocol.Bundle{}, lifecycleError(LifecyclePhaseRead, protocol.ErrorCode(err), false, err)
+	}
+
+	return bundle, nil
+}
+
+func lifecycleError(phase LifecyclePhase, code string, canRetry bool, err error) error {
+	return &LifecycleError{Phase: phase, Code: code, Retryable: canRetry, Err: err}
+}
+
+func lifecycleCode(err error) string {
+	if code := orpheus.Code(err); code != "" {
+		return code
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "request_timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "request_cancelled"
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) {
+		return "network_error"
+	}
+
+	return "unexpected_error"
+}
+
+func retryable(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var apiError *orpheus.Error
+	if errors.As(err, &apiError) {
+		return apiError.Status == http.StatusRequestTimeout || apiError.Status == http.StatusTooManyRequests || apiError.Status >= 500
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError)
+}
+
+func ineligibilityReasons(reasons []review.IneligibilityReason) []string {
+	values := make([]string, len(reasons))
+	for i, reason := range reasons {
+		values[i] = string(reason)
+	}
+
+	return values
+}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/gitlab"
+	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/review"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -25,6 +26,16 @@ type gitLabClientStub struct {
 	listStarted      chan struct{}
 	listRelease      chan struct{}
 	requestCanceled  chan struct{}
+}
+
+type reviewInputSinkStub struct {
+	snapshots []review.Snapshot
+	err       error
+}
+
+func (s *reviewInputSinkStub) Submit(_ context.Context, snapshot review.Snapshot) error {
+	s.snapshots = append(s.snapshots, snapshot)
+	return s.err
 }
 
 func (s *gitLabClientStub) CurrentUser(context.Context) (gitlab.User, error) {
@@ -59,7 +70,7 @@ func (s *gitLabClientStub) GetReviewInput(context.Context, int64, int64) (gitlab
 }
 
 func newTestWatcher(logger *zap.Logger, client gitLabClient) *Watcher {
-	return NewWatcher(logger, client, WatcherConfig{
+	return NewWatcher(logger, client, &reviewInputSinkStub{}, WatcherConfig{
 		PollInterval: time.Hour,
 		GitLabHost:   "https://gitlab.example.com",
 	})
@@ -111,7 +122,7 @@ func TestWatcherPollErrorDoesNotStopRun(t *testing.T) {
 	require.Equal(t, 1, client.listCalls)
 }
 
-func TestWatcherPollPreparesEligibleReviewInput(t *testing.T) {
+func TestWatcherPollFetchesAndPassesCompleteSnapshotToReconciler(t *testing.T) {
 	reviewer := gitlab.User{ID: 42, Username: "reviewer"}
 	client := &gitLabClientStub{
 		mergeRequests: []gitlab.MergeRequest{{ProjectID: 74, IID: 2989}},
@@ -132,8 +143,8 @@ func TestWatcherPollPreparesEligibleReviewInput(t *testing.T) {
 			Project: gitlab.Project{ID: 74, PathWithNamespace: "team/project"},
 		},
 	}
-	core, logs := observer.New(zap.DebugLevel)
-	watcher := NewWatcher(zap.New(core), client, WatcherConfig{
+	inputSink := &reviewInputSinkStub{}
+	watcher := NewWatcher(zaptest.NewLogger(t), client, inputSink, WatcherConfig{
 		PollInterval: time.Hour,
 		GitLabHost:   "https://gitlab.example.com/",
 	})
@@ -141,9 +152,58 @@ func TestWatcherPollPreparesEligibleReviewInput(t *testing.T) {
 	watcher.poll(context.Background(), reviewer)
 
 	require.Equal(t, 1, client.reviewInputCalls)
-	entries := logs.FilterMessage("prepared eligible GitLab review input").All()
-	require.Len(t, entries, 1)
-	require.Equal(t, "https://gitlab.example.com:74!2989", entries[0].ContextMap()["merge_request_key"])
+	require.Len(t, inputSink.snapshots, 1)
+	require.Len(t, inputSink.snapshots[0].Inputs, 1)
+	require.Equal(t, "https://gitlab.example.com:74!2989", inputSink.snapshots[0].Inputs[0].MRKey)
+	require.NotEmpty(t, inputSink.snapshots[0].Inputs[0].DiffFingerprint)
+	require.NotEmpty(t, inputSink.snapshots[0].Inputs[0].ReviewFingerprint)
+}
+
+func TestWatcherDoesNotSubmitPartialSnapshotWhenInputFetchFails(t *testing.T) {
+	reviewer := gitlab.User{ID: 42, Username: "reviewer"}
+	client := &gitLabClientStub{
+		mergeRequests:  []gitlab.MergeRequest{{ProjectID: 74, IID: 2989}},
+		reviewInputErr: errors.New("request failed"),
+	}
+	inputSink := &reviewInputSinkStub{}
+	watcher := NewWatcher(zaptest.NewLogger(t), client, inputSink, WatcherConfig{
+		PollInterval: time.Hour,
+		GitLabHost:   "https://gitlab.example.com",
+	})
+
+	watcher.poll(context.Background(), reviewer)
+
+	require.Empty(t, inputSink.snapshots)
+}
+
+func TestWatcherDefersFullQueueWithoutStoppingPoll(t *testing.T) {
+	reviewer := gitlab.User{ID: 42, Username: "reviewer"}
+	client := &gitLabClientStub{
+		mergeRequests: []gitlab.MergeRequest{
+			{ProjectID: 74, IID: 2989},
+			{ProjectID: 74, IID: 2990},
+		},
+		reviewInput: gitlab.ReviewInput{
+			MergeRequest: gitlab.MergeRequest{
+				ProjectID: 74,
+				IID:       2989,
+				State:     "opened",
+				Reviewers: []gitlab.User{reviewer},
+				DiffRefs:  gitlab.DiffRefs{BaseSHA: "base", StartSHA: "start", HeadSHA: "head"},
+			},
+			Project: gitlab.Project{ID: 74, PathWithNamespace: "team/project"},
+		},
+	}
+	core, logs := observer.New(zap.DebugLevel)
+	watcher := NewWatcher(zap.New(core), client, &reviewInputSinkStub{err: ErrReconcileQueueFull}, WatcherConfig{
+		PollInterval: time.Hour,
+		GitLabHost:   "https://gitlab.example.com",
+	})
+
+	watcher.poll(context.Background(), reviewer)
+
+	require.Equal(t, 2, client.reviewInputCalls)
+	require.Equal(t, 1, logs.FilterMessage("review reconcile queue is full; deferring snapshot until the next poll").Len())
 }
 
 func TestWatcherLetsInFlightPollFinishDuringShutdown(t *testing.T) {

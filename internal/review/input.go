@@ -20,6 +20,13 @@ type Input struct {
 	ReviewFingerprint string
 }
 
+// Snapshot is the complete set of review inputs observed by one successful
+// GitLab poll. An empty snapshot is meaningful: it means that no merge request
+// is currently assigned to the authenticated reviewer.
+type Snapshot struct {
+	Inputs []Input
+}
+
 func NewInput(host string, reviewer gitlab.User, source gitlab.ReviewInput) (Input, error) {
 	mrKey, err := MergeRequestKey(host, source.MergeRequest.ProjectID, source.MergeRequest.IID)
 	if err != nil {

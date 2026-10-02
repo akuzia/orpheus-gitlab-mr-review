@@ -3,8 +3,12 @@ package app
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/config"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -13,6 +17,39 @@ import (
 type serviceStub struct {
 	run  func(ctx context.Context) error
 	stop func(ctx context.Context) error
+}
+
+func TestNewRegistersIndependentWatcherAndReconcilerServices(t *testing.T) {
+	instructionsPath := filepath.Join(t.TempDir(), "instructions.md")
+	require.NoError(t, os.WriteFile(instructionsPath, []byte("# Project policy\n\nReview the pinned diff.\n"), 0o600))
+	application, err := New(config.Config{
+		LogLevel:               "debug",
+		HTTPTimeout:            time.Second,
+		PollInterval:           time.Minute,
+		ShutdownTimeout:        time.Second,
+		RunTimeout:             time.Hour,
+		HookTimeout:            time.Minute,
+		MaxSessionRequestBytes: 1 << 20,
+		ReconcileWorkerCount:   3,
+		ReconcileQueueCapacity: 12,
+		GitLab: config.GitLab{
+			BaseURL: "https://gitlab.example.com",
+			Token:   "gitlab-token",
+		},
+		Orpheus: config.Orpheus{
+			BaseURL:          "https://orpheus.example.com",
+			APIKey:           "orpheus-token",
+			AgentProfile:     "review-profile",
+			SandboxTemplate:  "review-sandbox",
+			InstructionFiles: []string{instructionsPath},
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(application.Close)
+
+	require.Len(t, application.services, 2)
+	require.Equal(t, "review reconciler", application.services[0].name)
+	require.Equal(t, "merge request watcher", application.services[1].name)
 }
 
 func (s serviceStub) Run(ctx context.Context) error {

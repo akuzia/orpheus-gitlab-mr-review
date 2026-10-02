@@ -19,17 +19,23 @@ type gitLabClient interface {
 	GetReviewInput(ctx context.Context, projectID, iid int64) (gitlab.ReviewInput, error)
 }
 
+type reviewInputSink interface {
+	Submit(ctx context.Context, snapshot review.Snapshot) error
+}
+
 type WatcherConfig struct {
 	PollInterval time.Duration
 	GitLabHost   string
 }
 
 // Watcher periodically discovers merge requests assigned to the authenticated
-// GitLab reviewer. Reconciliation and admission will be performed for every
-// successfully fetched review input as those parts of the connector are added.
+// GitLab reviewer, fetches their control-plane inputs, and hands one complete
+// poll snapshot to the reconciler. It does not make admission or Orpheus
+// lifecycle decisions.
 type Watcher struct {
 	logger         *zap.Logger
 	gitLabClient   gitLabClient
+	inputSink      reviewInputSink
 	pollInterval   time.Duration
 	gitLabHost     string
 	stopOnce       sync.Once
@@ -43,11 +49,13 @@ type Watcher struct {
 func NewWatcher(
 	logger *zap.Logger,
 	gitLabClient gitLabClient,
+	inputSink reviewInputSink,
 	cfg WatcherConfig,
 ) *Watcher {
 	return &Watcher{
 		logger:       logger,
 		gitLabClient: gitLabClient,
+		inputSink:    inputSink,
 		pollInterval: cfg.PollInterval,
 		gitLabHost:   cfg.GitLabHost,
 		stop:         make(chan struct{}),
@@ -164,6 +172,7 @@ func (w *Watcher) poll(ctx context.Context, reviewer gitlab.User) {
 	w.logger.Info("found GitLab merge requests assigned for review",
 		zap.Int("merge_request_count", len(mergeRequests)),
 	)
+	inputs := make([]review.Input, 0, len(mergeRequests))
 	for _, candidate := range mergeRequests {
 		gitLabInput, err := w.gitLabClient.GetReviewInput(ctx, candidate.ProjectID, candidate.IID)
 		if err != nil {
@@ -187,30 +196,21 @@ func (w *Watcher) poll(ctx context.Context, reviewer gitlab.User) {
 			)
 			return
 		}
-		eligibility := review.EvaluateInputEligibility(input)
-		if !eligibility.Eligible {
-			w.logger.Debug("GitLab merge request is not eligible for review",
-				zap.String("merge_request_key", input.MRKey),
-				zap.String("project_path", input.Project.PathWithNamespace),
-				zap.Strings("reasons", ineligibilityReasons(eligibility.Reasons)),
+		inputs = append(inputs, input)
+	}
+
+	if err := w.inputSink.Submit(ctx, review.Snapshot{Inputs: inputs}); err != nil {
+		switch {
+		case errors.Is(err, context.Canceled) && ctx.Err() != nil:
+			return
+		case errors.Is(err, ErrReconcilerStopping):
+			w.logger.Debug("review reconciler stopped accepting snapshot")
+		case errors.Is(err, ErrReconcileQueueFull):
+			w.logger.Warn("review reconcile queue is full; deferring snapshot until the next poll",
+				zap.Int("merge_request_count", len(inputs)),
 			)
-			continue
+		default:
+			w.logger.Error("failed to submit GitLab review snapshot", zap.Error(err))
 		}
-
-		w.logger.Debug("prepared eligible GitLab review input",
-			zap.String("merge_request_key", input.MRKey),
-			zap.String("project_path", input.Project.PathWithNamespace),
-			zap.String("diff_fingerprint", input.DiffFingerprint),
-			zap.String("review_fingerprint", input.ReviewFingerprint),
-		)
 	}
-}
-
-func ineligibilityReasons(reasons []review.IneligibilityReason) []string {
-	values := make([]string, len(reasons))
-	for i, reason := range reasons {
-		values[i] = string(reason)
-	}
-
-	return values
 }

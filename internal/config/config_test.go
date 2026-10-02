@@ -16,6 +16,17 @@ func TestLoadGitLabConfig(t *testing.T) {
 	t.Setenv("SHUTDOWN_TIMEOUT_SECONDS", "8")
 	t.Setenv("GITLAB_BASE_URL", " https://gitlab.example.com/root/ ")
 	t.Setenv("GITLAB_TOKEN", " token ")
+	t.Setenv("ORPHEUS_BASE_URL", " https://orpheus.example.com/api/ ")
+	t.Setenv("ORPHEUS_API_KEY", " orpheus-token ")
+	t.Setenv("ORPHEUS_AGENT_PROFILE", " review-profile ")
+	t.Setenv("ORPHEUS_AGENT_MODEL", " review-model ")
+	t.Setenv("ORPHEUS_SANDBOX_TEMPLATE", " review-sandbox ")
+	t.Setenv("ORPHEUS_AGENT_INSTRUCTION_FILES", " /policies/compliance.md, /policies/project.md ")
+	t.Setenv("RUN_TIMEOUT_SECONDS", "3600")
+	t.Setenv("HOOK_TIMEOUT_SECONDS", "120")
+	t.Setenv("MAX_SESSION_REQUEST_BYTES", "1048576")
+	t.Setenv("RECONCILE_WORKER_COUNT", "6")
+	t.Setenv("RECONCILE_QUEUE_CAPACITY", "48")
 
 	cfg, err := Load()
 	require.NoError(t, err)
@@ -24,8 +35,29 @@ func TestLoadGitLabConfig(t *testing.T) {
 	require.Equal(t, 12*time.Second, cfg.HTTPTimeout)
 	require.Equal(t, 15*time.Second, cfg.PollInterval)
 	require.Equal(t, 8*time.Second, cfg.ShutdownTimeout)
+	require.Equal(t, time.Hour, cfg.RunTimeout)
+	require.Equal(t, 2*time.Minute, cfg.HookTimeout)
+	require.Equal(t, 1<<20, cfg.MaxSessionRequestBytes)
+	require.Equal(t, 6, cfg.ReconcileWorkerCount)
+	require.Equal(t, 48, cfg.ReconcileQueueCapacity)
 	require.Equal(t, "https://gitlab.example.com/root", cfg.GitLab.BaseURL)
 	require.Equal(t, "token", cfg.GitLab.Token)
+	require.Equal(t, "https://orpheus.example.com/api", cfg.Orpheus.BaseURL)
+	require.Equal(t, "orpheus-token", cfg.Orpheus.APIKey)
+	require.Equal(t, "review-profile", cfg.Orpheus.AgentProfile)
+	require.Equal(t, "review-model", cfg.Orpheus.AgentModel)
+	require.Equal(t, "review-sandbox", cfg.Orpheus.SandboxTemplate)
+	require.Equal(t, []string{"/policies/compliance.md", "/policies/project.md"}, cfg.Orpheus.InstructionFiles)
+}
+
+func TestLoadRequiresOrpheusSettings(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("GITLAB_BASE_URL", "https://gitlab.example.com")
+	t.Setenv("GITLAB_TOKEN", "token")
+	t.Setenv("ORPHEUS_BASE_URL", "")
+
+	_, err := Load()
+	require.EqualError(t, err, "ORPHEUS_BASE_URL is required")
 }
 
 func TestLoadRequiresGitLabSettings(t *testing.T) {
@@ -81,6 +113,30 @@ func TestParsePositiveSeconds(t *testing.T) {
 
 	_, err = parsePositiveSeconds("HTTP_TIMEOUT_SECONDS", "2s")
 	require.ErrorContains(t, err, "parse HTTP_TIMEOUT_SECONDS")
+}
+
+func TestParseOrderedList(t *testing.T) {
+	t.Parallel()
+
+	values, err := parseOrderedList("FILES", " first.md, ,second.md ")
+	require.NoError(t, err)
+	require.Equal(t, []string{"first.md", "second.md"}, values)
+
+	_, err = parseOrderedList("FILES", "first.md, first.md")
+	require.EqualError(t, err, `FILES contains duplicate value "first.md"`)
+	_, err = parseOrderedList("FILES", " , ")
+	require.EqualError(t, err, "FILES is required")
+}
+
+func TestParsePositiveIntEnforcesMaximum(t *testing.T) {
+	t.Parallel()
+
+	value, err := parsePositiveInt("LIMIT", "10", 10)
+	require.NoError(t, err)
+	require.Equal(t, 10, value)
+
+	_, err = parsePositiveInt("LIMIT", "11", 10)
+	require.EqualError(t, err, "LIMIT must not exceed 10")
 }
 
 func TestLoadRejectsInvalidPollInterval(t *testing.T) {

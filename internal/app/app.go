@@ -10,6 +10,9 @@ import (
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/connector"
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/gitlab"
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/observability"
+	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/orpheus"
+	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/review"
+	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/workflow"
 
 	"go.uber.org/zap"
 )
@@ -46,8 +49,39 @@ func New(cfg config.Config) (*App, error) {
 		_ = logger.Sync()
 		return nil, err
 	}
+	orpheusClient, err := orpheus.New(cfg.Orpheus.BaseURL, cfg.Orpheus.APIKey, cfg.HTTPTimeout)
+	if err != nil {
+		_ = logger.Sync()
+		return nil, err
+	}
+	instructions, err := workflow.LoadInstructions(cfg.Orpheus.InstructionFiles, cfg.MaxSessionRequestBytes)
+	if err != nil {
+		_ = logger.Sync()
+		return nil, err
+	}
+	contractOptions := workflow.Options{
+		GitLabHost:         cfg.GitLab.BaseURL,
+		Instructions:       instructions,
+		AgentProfile:       cfg.Orpheus.AgentProfile,
+		AgentModel:         cfg.Orpheus.AgentModel,
+		SandboxTemplate:    cfg.Orpheus.SandboxTemplate,
+		RunTimeoutSeconds:  int(cfg.RunTimeout / time.Second),
+		HookTimeoutSeconds: int(cfg.HookTimeout / time.Second),
+		MaxRequestBytes:    cfg.MaxSessionRequestBytes,
+	}
 
-	watcher := connector.NewWatcher(logger, gitLabClient, connector.WatcherConfig{
+	reconciler := connector.NewReconciler(
+		logger,
+		orpheusClient,
+		func(input review.Input) (workflow.SessionContract, error) {
+			return workflow.BuildSessionContract(input, contractOptions)
+		},
+		connector.ReconcilerConfig{
+			WorkerCount:   cfg.ReconcileWorkerCount,
+			QueueCapacity: cfg.ReconcileQueueCapacity,
+		},
+	)
+	watcher := connector.NewWatcher(logger, gitLabClient, reconciler, connector.WatcherConfig{
 		PollInterval: cfg.PollInterval,
 		GitLabHost:   cfg.GitLab.BaseURL,
 	})
@@ -55,6 +89,7 @@ func New(cfg config.Config) (*App, error) {
 	return &App{
 		logger: logger,
 		services: []namedService{
+			{name: "review reconciler", service: reconciler},
 			{name: "merge request watcher", service: watcher},
 		},
 		shutdownTimeout: cfg.ShutdownTimeout,
