@@ -17,6 +17,7 @@ type Mode string
 const maximumSessionRequestBytes = 16 << 20
 const maximumReconcileWorkerCount = 64
 const maximumReconcileQueueCapacity = 4096
+const maximumConcurrentReviews = 1024
 
 const (
 	ModeDevelopment Mode = "dev"
@@ -38,6 +39,7 @@ type Config struct {
 	MaxSessionRequestBytes int
 	ReconcileWorkerCount   int
 	ReconcileQueueCapacity int
+	MaxConcurrentReviews   int
 	GitLab                 GitLab
 	Orpheus                Orpheus
 }
@@ -68,6 +70,7 @@ func Load() (Config, error) {
 	v.SetDefault("max_session_request_bytes", 1<<20)
 	v.SetDefault("reconcile_worker_count", 4)
 	v.SetDefault("reconcile_queue_capacity", 128)
+	v.SetDefault("max_concurrent_reviews", 4)
 	v.AutomaticEnv()
 
 	if _, err := os.Stat(".env"); err == nil {
@@ -119,6 +122,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	maxConcurrentReviews, err := parsePositiveInt("MAX_CONCURRENT_REVIEWS", v.GetString("max_concurrent_reviews"), maximumConcurrentReviews)
+	if err != nil {
+		return Config{}, err
+	}
 
 	gitLabBaseURL, err := parseBaseURL("GITLAB_BASE_URL", v.GetString("gitlab_base_url"))
 	if err != nil {
@@ -162,6 +169,7 @@ func Load() (Config, error) {
 		MaxSessionRequestBytes: maxSessionRequestBytes,
 		ReconcileWorkerCount:   reconcileWorkerCount,
 		ReconcileQueueCapacity: reconcileQueueCapacity,
+		MaxConcurrentReviews:   maxConcurrentReviews,
 		GitLab: GitLab{
 			BaseURL: gitLabBaseURL,
 			Token:   gitLabToken,

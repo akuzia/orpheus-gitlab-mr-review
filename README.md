@@ -34,5 +34,7 @@ Timeout variables use explicit seconds: `HTTP_TIMEOUT_SECONDS`, `POLL_INTERVAL_S
 `RECONCILE_WORKER_COUNT` controls parallel Orpheus lifecycle calls and
 `RECONCILE_QUEUE_CAPACITY` bounds the in-memory queue of complete poll snapshots. GitLab polling
 submits a snapshot only after every candidate was fetched successfully and never waits for Orpheus
-requests. The reconciler compares consecutive snapshots and cancels an active review when its merge
-request disappears from the authenticated reviewer's selection.
+requests. Before admission, the reconciler restores active workflow sessions from Orpheus and
+compares them with current GitLab state. A transient read error prevents all creates for that tick.
+`MAX_CONCURRENT_REVIEWS` bounds active Orpheus review sessions; excess candidates remain assigned and
+are reconsidered on the next poll.

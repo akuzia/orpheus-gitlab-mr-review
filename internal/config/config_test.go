@@ -27,6 +27,7 @@ func TestLoadGitLabConfig(t *testing.T) {
 	t.Setenv("MAX_SESSION_REQUEST_BYTES", "1048576")
 	t.Setenv("RECONCILE_WORKER_COUNT", "6")
 	t.Setenv("RECONCILE_QUEUE_CAPACITY", "48")
+	t.Setenv("MAX_CONCURRENT_REVIEWS", "9")
 
 	cfg, err := Load()
 	require.NoError(t, err)
@@ -40,6 +41,7 @@ func TestLoadGitLabConfig(t *testing.T) {
 	require.Equal(t, 1<<20, cfg.MaxSessionRequestBytes)
 	require.Equal(t, 6, cfg.ReconcileWorkerCount)
 	require.Equal(t, 48, cfg.ReconcileQueueCapacity)
+	require.Equal(t, 9, cfg.MaxConcurrentReviews)
 	require.Equal(t, "https://gitlab.example.com/root", cfg.GitLab.BaseURL)
 	require.Equal(t, "token", cfg.GitLab.Token)
 	require.Equal(t, "https://orpheus.example.com/api", cfg.Orpheus.BaseURL)

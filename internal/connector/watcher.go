@@ -199,7 +199,7 @@ func (w *Watcher) poll(ctx context.Context, reviewer gitlab.User) {
 		inputs = append(inputs, input)
 	}
 
-	if err := w.inputSink.Submit(ctx, review.Snapshot{Inputs: inputs}); err != nil {
+	if err := w.inputSink.Submit(ctx, review.Snapshot{Reviewer: reviewer, Inputs: inputs}); err != nil {
 		switch {
 		case errors.Is(err, context.Canceled) && ctx.Err() != nil:
 			return

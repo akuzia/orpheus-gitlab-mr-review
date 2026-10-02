@@ -44,6 +44,7 @@ type ReviewSessionKey struct {
 type Session struct {
 	ID               string
 	RunID            string
+	MRKey            string
 	Status           string
 	InputFingerprint string
 	CreatedAt        time.Time
@@ -92,6 +93,17 @@ type apiClient interface {
 	ListAllRuns(
 		ctx context.Context,
 		params *api.ListAllRunsParams,
+		reqEditors ...api.RequestEditorFn,
+	) (*http.Response, error)
+	ListSessions(
+		ctx context.Context,
+		params *api.ListSessionsParams,
+		reqEditors ...api.RequestEditorFn,
+	) (*http.Response, error)
+	GetRun(
+		ctx context.Context,
+		sid uuid.UUID,
+		rid uuid.UUID,
 		reqEditors ...api.RequestEditorFn,
 	) (*http.Response, error)
 	CreateSession(
@@ -194,6 +206,90 @@ func (c *Client) FindSessions(ctx context.Context, key ReviewSessionKey) ([]Sess
 	}
 
 	return sessions, nil
+}
+
+// ListActiveSessions returns the latest unfinished run for every active
+// one-shot session in a workflow namespace. Session listing supplies the MR
+// key, while the run read supplies the immutable input fingerprint and current
+// lifecycle status required for restart recovery.
+func (c *Client) ListActiveSessions(ctx context.Context, namespace string) ([]Session, error) {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		return nil, errors.New("list active Orpheus sessions: namespace is required")
+	}
+	activity := api.Active
+	params := &api.ListSessionsParams{
+		Activity:  &activity,
+		Namespace: &namespace,
+		Order:     new(api.ListSessionsParamsOrderAsc),
+		Limit:     new(pageSize),
+	}
+	seenCursors := make(map[string]struct{})
+	var sessions []Session
+	for {
+		response, requestErr := c.api.ListSessions(ctx, params)
+		page, err := decode[api.SessionPage](response, requestErr, http.StatusOK)
+		if err != nil {
+			return nil, fmt.Errorf("list active Orpheus sessions: %w", err)
+		}
+		for _, item := range page.Items {
+			if item.ExternalKey == nil || strings.TrimSpace(*item.ExternalKey) == "" {
+				return nil, errors.New("list active Orpheus sessions: session has no external key")
+			}
+			if item.AllowMultipleRuns {
+				return nil, errors.New("list active Orpheus sessions: review session allows multiple runs")
+			}
+			runResponse, requestErr := c.api.GetRun(ctx, item.ID, item.LastRunID)
+			run, err := decode[api.Run](runResponse, requestErr, http.StatusOK)
+			if err != nil {
+				return nil, fmt.Errorf("list active Orpheus sessions: read latest run: %w", err)
+			}
+			if run.SessionID != item.ID || run.ID != item.LastRunID {
+				return nil, errors.New("list active Orpheus sessions: latest run identity mismatch")
+			}
+			session, err := sessionFromAPI(run)
+			if err != nil {
+				return nil, fmt.Errorf("list active Orpheus sessions: %w", err)
+			}
+			active, err := classifyActivity(session.Status)
+			if err != nil {
+				return nil, fmt.Errorf("list active Orpheus sessions: %w", err)
+			}
+			if !active {
+				continue
+			}
+			if strings.TrimSpace(session.InputFingerprint) == "" {
+				return nil, errors.New("list active Orpheus sessions: latest run has no input fingerprint")
+			}
+			session.MRKey = *item.ExternalKey
+			sessions = append(sessions, session)
+		}
+		if page.NextCursor == nil {
+			break
+		}
+		cursor := *page.NextCursor
+		if cursor == "" {
+			return nil, errors.New("list active Orpheus sessions: empty pagination cursor")
+		}
+		if _, exists := seenCursors[cursor]; exists {
+			return nil, errors.New("list active Orpheus sessions: repeated pagination cursor")
+		}
+		seenCursors[cursor] = struct{}{}
+		params.Cursor = &cursor
+	}
+
+	return sessions, nil
+}
+
+func classifyActivity(status string) (bool, error) {
+	switch status {
+	case "accepted", "starting", "running", "cancelling", "finalizing":
+		return true, nil
+	case "completed", "failed", "cancelled":
+		return false, nil
+	default:
+		return false, fmt.Errorf("unsupported run status %q", status)
+	}
 }
 
 func (c *Client) FindMessageMetadata(

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/config"
@@ -15,6 +16,23 @@ const userAgent = "orpheus-gitlab-mr-review"
 const pageSize int64 = 100
 
 var ErrReviewInputChanged = errors.New("merge request changed while loading review input")
+
+func IsRetryable(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrReviewInputChanged) {
+		return true
+	}
+	var responseError *gitlabapi.ErrorResponse
+	if errors.As(err, &responseError) {
+		return responseError.StatusCode == http.StatusRequestTimeout ||
+			responseError.StatusCode == http.StatusTooManyRequests ||
+			responseError.StatusCode >= http.StatusInternalServerError
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError)
+}
 
 type Client struct {
 	api *gitlabapi.Client

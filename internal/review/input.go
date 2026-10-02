@@ -24,7 +24,8 @@ type Input struct {
 // GitLab poll. An empty snapshot is meaningful: it means that no merge request
 // is currently assigned to the authenticated reviewer.
 type Snapshot struct {
-	Inputs []Input
+	Reviewer gitlab.User
+	Inputs   []Input
 }
 
 func NewInput(host string, reviewer gitlab.User, source gitlab.ReviewInput) (Input, error) {

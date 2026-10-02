@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,10 +23,13 @@ import (
 )
 
 type orpheusMock struct {
+	mu            sync.Mutex
 	find          func(context.Context, orpheus.ReviewSessionKey) ([]orpheus.Session, error)
+	active        func(context.Context, string) ([]orpheus.Session, error)
 	cancel        func(context.Context, string, string) error
 	create        func(context.Context, orpheus.ReviewSessionKey, int64, orpheus.CreateSessionRequest) (orpheus.Accepted, error)
 	findCalls     int
+	activeCalls   int
 	cancelCalls   int
 	createCalls   int
 	lastKey       orpheus.ReviewSessionKey
@@ -37,11 +41,30 @@ type orpheusMock struct {
 
 type concurrentOrpheusStub struct {
 	find   func(context.Context, orpheus.ReviewSessionKey) ([]orpheus.Session, error)
+	active func(context.Context, string) ([]orpheus.Session, error)
 	cancel func(context.Context, string, string) error
+}
+
+type gitLabReviewSourceStub struct {
+	input gitlab.ReviewInput
+	err   error
+	calls int
+}
+
+func (s *gitLabReviewSourceStub) GetReviewInput(context.Context, int64, int64) (gitlab.ReviewInput, error) {
+	s.calls++
+	return s.input, s.err
 }
 
 func (s concurrentOrpheusStub) FindSessions(ctx context.Context, key orpheus.ReviewSessionKey) ([]orpheus.Session, error) {
 	return s.find(ctx, key)
+}
+
+func (s concurrentOrpheusStub) ListActiveSessions(ctx context.Context, namespace string) ([]orpheus.Session, error) {
+	if s.active == nil {
+		return nil, nil
+	}
+	return s.active(ctx, namespace)
 }
 
 func (s concurrentOrpheusStub) CancelRun(ctx context.Context, sessionID, runID string) error {
@@ -60,39 +83,62 @@ func (concurrentOrpheusStub) FindMessageMetadata(context.Context, string, string
 }
 
 func (m *orpheusMock) FindMessageMetadata(ctx context.Context, sessionID, runID, externalKey string) (json.RawMessage, error) {
+	m.mu.Lock()
 	m.metadataCalls++
-	if m.metadata == nil {
+	metadata := m.metadata
+	m.mu.Unlock()
+	if metadata == nil {
 		return nil, errors.New("unexpected metadata request")
 	}
-	return m.metadata(ctx, sessionID, runID, externalKey)
+	return metadata(ctx, sessionID, runID, externalKey)
 }
 
 func (m *orpheusMock) FindSessions(ctx context.Context, key orpheus.ReviewSessionKey) ([]orpheus.Session, error) {
+	m.mu.Lock()
 	m.findCalls++
 	m.lastKey = key
-	if m.find == nil {
+	find := m.find
+	m.mu.Unlock()
+	if find == nil {
 		return nil, nil
 	}
-	return m.find(ctx, key)
+	return find(ctx, key)
+}
+
+func (m *orpheusMock) ListActiveSessions(ctx context.Context, namespace string) ([]orpheus.Session, error) {
+	m.mu.Lock()
+	m.activeCalls++
+	active := m.active
+	m.mu.Unlock()
+	if active == nil {
+		return nil, nil
+	}
+	return active(ctx, namespace)
 }
 
 func (m *orpheusMock) CancelRun(ctx context.Context, sessionID, runID string) error {
+	m.mu.Lock()
 	m.cancelCalls++
-	if m.cancel == nil {
+	cancel := m.cancel
+	m.mu.Unlock()
+	if cancel == nil {
 		return errors.New("unexpected cancel run")
 	}
-	return m.cancel(ctx, sessionID, runID)
+	return cancel(ctx, sessionID, runID)
 }
 
 func (m *orpheusMock) CreateSession(ctx context.Context, key orpheus.ReviewSessionKey, reviewerID int64, request orpheus.CreateSessionRequest) (orpheus.Accepted, error) {
+	m.mu.Lock()
 	m.createCalls++
 	m.lastKey = key
 	m.lastReviewer = reviewerID
 	m.lastRequest = request
-	if m.create == nil {
+	create := m.create
+	m.mu.Unlock()
+	if create == nil {
 		return orpheus.Accepted{}, nil
 	}
-	return m.create(ctx, key, reviewerID, request)
+	return create(ctx, key, reviewerID, request)
 }
 
 func TestReconcilerCreatesSessionForNewEligibleInput(t *testing.T) {
@@ -104,7 +150,7 @@ func TestReconcilerCreatesSessionForNewEligibleInput(t *testing.T) {
 	}}
 	input := eligibleReviewInput()
 	contract := testSessionContract(input)
-	reconciler := NewReconciler(zap.New(core), client, func(got review.Input) (workflow.SessionContract, error) {
+	reconciler := NewReconciler(zap.New(core), nil, client, func(got review.Input) (workflow.SessionContract, error) {
 		require.Equal(t, input, got)
 		return contract, nil
 	})
@@ -131,7 +177,7 @@ func TestReconcilerDoesNotCreateSecondAnalysisForExistingSession(t *testing.T) {
 				return []orpheus.Session{{ID: "session-1", RunID: "run-1", Status: status}}, nil
 			}}
 			buildCalls := 0
-			reconciler := NewReconciler(zap.NewNop(), client, func(review.Input) (workflow.SessionContract, error) {
+			reconciler := NewReconciler(zap.NewNop(), nil, client, func(review.Input) (workflow.SessionContract, error) {
 				buildCalls++
 				return workflow.SessionContract{}, nil
 			})
@@ -202,7 +248,7 @@ func TestReconcilerValidatesCompletedBundleAgainstImmutableMetadata(t *testing.T
 		},
 	}
 	core, logs := observer.New(zap.DebugLevel)
-	reconciler := NewReconciler(zap.New(core), client, func(review.Input) (workflow.SessionContract, error) {
+	reconciler := NewReconciler(zap.New(core), nil, client, func(review.Input) (workflow.SessionContract, error) {
 		t.Fatal("completed session must not build a new contract")
 		return workflow.SessionContract{}, nil
 	})
@@ -251,7 +297,7 @@ func TestReconcilerRejectsCompletedRunWithoutSuccessfulAgentAndHook(t *testing.T
 			client := &orpheusMock{find: func(context.Context, orpheus.ReviewSessionKey) ([]orpheus.Session, error) {
 				return []orpheus.Session{test.session}, nil
 			}}
-			reconciler := NewReconciler(zap.NewNop(), client, func(review.Input) (workflow.SessionContract, error) {
+			reconciler := NewReconciler(zap.NewNop(), nil, client, func(review.Input) (workflow.SessionContract, error) {
 				return workflow.SessionContract{}, errors.New("must not build")
 			})
 
@@ -272,7 +318,7 @@ func TestReconcilerSkipsIneligibleInputBeforeOrpheus(t *testing.T) {
 
 	core, logs := observer.New(zap.DebugLevel)
 	client := &orpheusMock{}
-	reconciler := NewReconciler(zap.New(core), client, func(review.Input) (workflow.SessionContract, error) {
+	reconciler := NewReconciler(zap.New(core), nil, client, func(review.Input) (workflow.SessionContract, error) {
 		t.Fatal("contract builder must not be called")
 		return workflow.SessionContract{}, nil
 	})
@@ -309,7 +355,7 @@ func TestReconcilerClassifiesRetryableLifecycleErrors(t *testing.T) {
 			client := &orpheusMock{find: func(context.Context, orpheus.ReviewSessionKey) ([]orpheus.Session, error) {
 				return nil, test.err
 			}}
-			reconciler := NewReconciler(zap.NewNop(), client, func(review.Input) (workflow.SessionContract, error) {
+			reconciler := NewReconciler(zap.NewNop(), nil, client, func(review.Input) (workflow.SessionContract, error) {
 				return workflow.SessionContract{}, nil
 			})
 
@@ -340,7 +386,7 @@ func TestReconcilerRecoversUncertainCreateWithoutSecondAnalysis(t *testing.T) {
 	}
 	input := eligibleReviewInput()
 	contract := testSessionContract(input)
-	reconciler := NewReconciler(zap.NewNop(), client, func(review.Input) (workflow.SessionContract, error) {
+	reconciler := NewReconciler(zap.NewNop(), nil, client, func(review.Input) (workflow.SessionContract, error) {
 		return contract, nil
 	})
 
@@ -359,7 +405,7 @@ func TestReconcilerDoesNotRetryInvalidContractOrDuplicateSessions(t *testing.T) 
 
 	input := eligibleReviewInput()
 	client := &orpheusMock{}
-	reconciler := NewReconciler(zap.NewNop(), client, func(review.Input) (workflow.SessionContract, error) {
+	reconciler := NewReconciler(zap.NewNop(), nil, client, func(review.Input) (workflow.SessionContract, error) {
 		return workflow.SessionContract{}, &workflow.RequestTooLargeError{Size: 2, Limit: 1}
 	})
 
@@ -386,7 +432,7 @@ func TestReconcilerReturnsPermanentErrorForUnknownStatus(t *testing.T) {
 	client := &orpheusMock{find: func(context.Context, orpheus.ReviewSessionKey) ([]orpheus.Session, error) {
 		return []orpheus.Session{{Status: "new-status"}}, nil
 	}}
-	reconciler := NewReconciler(zap.NewNop(), client, func(review.Input) (workflow.SessionContract, error) {
+	reconciler := NewReconciler(zap.NewNop(), nil, client, func(review.Input) (workflow.SessionContract, error) {
 		return workflow.SessionContract{}, errors.New("unused")
 	})
 
@@ -441,7 +487,7 @@ func TestReconcilerAndAdapterHTTPContract(t *testing.T) {
 	require.NoError(t, err)
 	input := eligibleReviewInput()
 	input.MergeRequest.WebURL = "https://gitlab.example.com/team/project/-/merge_requests/2989"
-	reconciler := NewReconciler(zap.NewNop(), client, func(input review.Input) (workflow.SessionContract, error) {
+	reconciler := NewReconciler(zap.NewNop(), nil, client, func(input review.Input) (workflow.SessionContract, error) {
 		return workflow.BuildSessionContract(input, workflow.Options{
 			GitLabHost:         "https://gitlab.example.com",
 			Instructions:       "# Project policy\n\nReview the pinned diff.\n",
@@ -459,6 +505,140 @@ func TestReconcilerAndAdapterHTTPContract(t *testing.T) {
 	require.Equal(t, 2, requestCount)
 }
 
+func TestAdmissionTransientLookupPreventsAllCreatesInTick(t *testing.T) {
+	first := eligibleReviewInput()
+	second := anotherEligibleReviewInput()
+	client := &orpheusMock{
+		find: func(_ context.Context, key orpheus.ReviewSessionKey) ([]orpheus.Session, error) {
+			if key.MRKey == first.MRKey {
+				return nil, &orpheus.Error{Status: http.StatusServiceUnavailable, Code: "unavailable"}
+			}
+			return nil, nil
+		},
+	}
+	reconciler := NewReconciler(
+		zap.NewNop(),
+		nil,
+		client,
+		func(input review.Input) (workflow.SessionContract, error) { return testSessionContract(input), nil },
+		ReconcilerConfig{WorkerCount: 2, QueueCapacity: 1, MaxConcurrent: 2},
+	)
+
+	reconciler.processSnapshot(context.Background(), reviewSnapshot(first, second))
+
+	require.Equal(t, 2, client.findCalls)
+	require.Zero(t, client.createCalls)
+}
+
+func TestAdmissionCreatesOnlyUpToAvailableCapacity(t *testing.T) {
+	client := &orpheusMock{}
+	core, logs := observer.New(zap.DebugLevel)
+	reconciler := NewReconciler(
+		zap.New(core),
+		nil,
+		client,
+		func(input review.Input) (workflow.SessionContract, error) { return testSessionContract(input), nil },
+		ReconcilerConfig{WorkerCount: 2, QueueCapacity: 1, MaxConcurrent: 1},
+	)
+
+	reconciler.processSnapshot(context.Background(), reviewSnapshot(eligibleReviewInput(), anotherEligibleReviewInput()))
+
+	require.Equal(t, 2, client.findCalls)
+	require.Equal(t, 1, client.createCalls)
+	require.Equal(t, 1, logs.FilterMessage("review admission capacity is exhausted; deferring until the next poll").Len())
+}
+
+func TestAdmissionTransientActiveSessionReadPreventsCandidateLookup(t *testing.T) {
+	client := &orpheusMock{active: func(context.Context, string) ([]orpheus.Session, error) {
+		return nil, &orpheus.Error{Status: http.StatusServiceUnavailable, Code: "unavailable"}
+	}}
+	reconciler := NewReconciler(
+		zap.NewNop(),
+		nil,
+		client,
+		func(input review.Input) (workflow.SessionContract, error) { return testSessionContract(input), nil },
+	)
+
+	reconciler.processSnapshot(context.Background(), reviewSnapshot(eligibleReviewInput()))
+
+	require.Zero(t, client.findCalls)
+	require.Zero(t, client.createCalls)
+}
+
+func TestReconcilerCancelsActiveSessionWhenDiffChanges(t *testing.T) {
+	input := eligibleReviewInput()
+	metadata := recoveredMetadata(t, input)
+	client := &orpheusMock{
+		active: func(context.Context, string) ([]orpheus.Session, error) {
+			return []orpheus.Session{{
+				ID:               "session-1",
+				RunID:            "run-1",
+				MRKey:            input.MRKey,
+				InputFingerprint: input.ReviewFingerprint,
+				Status:           "running",
+			}}, nil
+		},
+		metadata: func(context.Context, string, string, string) (json.RawMessage, error) {
+			return metadata, nil
+		},
+		cancel: func(context.Context, string, string) error { return nil },
+	}
+	changed := input
+	changed.MergeRequest.DiffRefs.HeadSHA = "changed-head"
+	changed.DiffFingerprint = strings.Repeat("c", 64)
+	changed.ReviewFingerprint = strings.Repeat("f", 64)
+	core, logs := observer.New(zap.DebugLevel)
+	reconciler := NewReconciler(
+		zap.New(core),
+		nil,
+		client,
+		func(review.Input) (workflow.SessionContract, error) { return workflow.SessionContract{}, nil },
+	)
+
+	reconciler.processSnapshot(context.Background(), reviewSnapshot(changed))
+
+	require.Equal(t, 1, client.cancelCalls)
+	require.Zero(t, client.findCalls)
+	entries := logs.FilterMessage("cancelled stale Orpheus review session").All()
+	require.Len(t, entries, 1)
+	require.Equal(t, "diff_changed", entries[0].ContextMap()["cancellation_reason"])
+}
+
+func TestReconcilerReadsAndKeepsCurrentActiveSession(t *testing.T) {
+	input := eligibleReviewInput()
+	metadata := recoveredMetadata(t, input)
+	client := &orpheusMock{
+		active: func(context.Context, string) ([]orpheus.Session, error) {
+			return []orpheus.Session{{
+				ID:               "session-1",
+				RunID:            "run-1",
+				MRKey:            input.MRKey,
+				InputFingerprint: input.ReviewFingerprint,
+				Status:           "starting",
+			}}, nil
+		},
+		metadata: func(context.Context, string, string, string) (json.RawMessage, error) {
+			return metadata, nil
+		},
+	}
+	core, logs := observer.New(zap.DebugLevel)
+	reconciler := NewReconciler(
+		zap.New(core),
+		nil,
+		client,
+		func(review.Input) (workflow.SessionContract, error) { return workflow.SessionContract{}, nil },
+	)
+
+	reconciler.processSnapshot(context.Background(), reviewSnapshot(input))
+
+	require.Zero(t, client.cancelCalls)
+	require.Zero(t, client.findCalls)
+	require.Zero(t, client.createCalls)
+	entries := logs.FilterMessage("reconciled active Orpheus review session").All()
+	require.Len(t, entries, 1)
+	require.Equal(t, "starting", entries[0].ContextMap()["run_status"])
+}
+
 func TestReconcilerWorkersProcessInputsConcurrently(t *testing.T) {
 	started := make(chan struct{}, 2)
 	release := make(chan struct{})
@@ -469,6 +649,7 @@ func TestReconcilerWorkersProcessInputsConcurrently(t *testing.T) {
 	}}
 	reconciler := NewReconciler(
 		zap.NewNop(),
+		nil,
 		client,
 		func(review.Input) (workflow.SessionContract, error) { return workflow.SessionContract{}, nil },
 		ReconcilerConfig{WorkerCount: 2, QueueCapacity: 2},
@@ -479,7 +660,7 @@ func TestReconcilerWorkersProcessInputsConcurrently(t *testing.T) {
 	<-reconciler.started
 	first := eligibleReviewInput()
 	second := anotherEligibleReviewInput()
-	require.NoError(t, reconciler.Submit(context.Background(), review.Snapshot{Inputs: []review.Input{first, second}}))
+	require.NoError(t, reconciler.Submit(context.Background(), reviewSnapshot(first, second)))
 
 	for range 2 {
 		select {
@@ -496,55 +677,90 @@ func TestReconcilerWorkersProcessInputsConcurrently(t *testing.T) {
 	require.NoError(t, <-runDone)
 }
 
-func TestReconcilerCancelsActiveRunRemovedBetweenSnapshots(t *testing.T) {
-	finds := make(chan struct{}, 2)
-	cancelled := make(chan struct{})
-	client := concurrentOrpheusStub{
-		find: func(context.Context, orpheus.ReviewSessionKey) ([]orpheus.Session, error) {
-			finds <- struct{}{}
-			return []orpheus.Session{{ID: "session-1", RunID: "run-1", Status: "running"}}, nil
+func TestReconcilerRecoversAndCancelsRunWhoseReviewerWasRemoved(t *testing.T) {
+	input := eligibleReviewInput()
+	metadata := recoveredMetadata(t, input)
+	client := &orpheusMock{
+		active: func(context.Context, string) ([]orpheus.Session, error) {
+			return []orpheus.Session{{
+				ID:               "session-1",
+				RunID:            "run-1",
+				MRKey:            input.MRKey,
+				InputFingerprint: input.ReviewFingerprint,
+				Status:           "running",
+			}}, nil
+		},
+		metadata: func(context.Context, string, string, string) (json.RawMessage, error) {
+			return metadata, nil
 		},
 		cancel: func(_ context.Context, sessionID, runID string) error {
 			require.Equal(t, "session-1", sessionID)
 			require.Equal(t, "run-1", runID)
-			close(cancelled)
 			return nil
 		},
 	}
+	removed := input
+	removed.MergeRequest.Reviewers = nil
+	source := &gitLabReviewSourceStub{input: gitlab.ReviewInput{
+		MergeRequest: removed.MergeRequest,
+		Project:      removed.Project,
+		Notes:        removed.Notes,
+	}}
 	core, logs := observer.New(zap.DebugLevel)
 	reconciler := NewReconciler(
 		zap.New(core),
+		source,
 		client,
 		func(review.Input) (workflow.SessionContract, error) { return workflow.SessionContract{}, nil },
 		ReconcilerConfig{WorkerCount: 2, QueueCapacity: 2},
 	)
-	ctx, cancel := context.WithCancel(context.Background())
-	runDone := make(chan error, 1)
-	go func() { runDone <- reconciler.Run(ctx) }()
-	<-reconciler.started
 
-	require.NoError(t, reconciler.Submit(context.Background(), review.Snapshot{Inputs: []review.Input{eligibleReviewInput()}}))
-	<-finds
-	require.NoError(t, reconciler.Submit(context.Background(), review.Snapshot{}))
-	select {
-	case <-cancelled:
-	case <-time.After(time.Second):
-		t.Fatal("removed review run was not cancelled")
+	reconciler.processSnapshot(context.Background(), reviewSnapshot())
+
+	require.Equal(t, 1, source.calls)
+	require.Equal(t, 1, client.cancelCalls)
+	require.Equal(t, 1, logs.FilterMessage("cancelled stale Orpheus review session").Len())
+}
+
+func TestReconcilerRecoversAndCancelsRunForClosedMergeRequest(t *testing.T) {
+	input := eligibleReviewInput()
+	metadata := recoveredMetadata(t, input)
+	client := &orpheusMock{
+		active: func(context.Context, string) ([]orpheus.Session, error) {
+			return []orpheus.Session{{ID: "session-1", RunID: "run-1", MRKey: input.MRKey, InputFingerprint: input.ReviewFingerprint, Status: "running"}}, nil
+		},
+		metadata: func(context.Context, string, string, string) (json.RawMessage, error) { return metadata, nil },
+		cancel:   func(context.Context, string, string) error { return nil },
 	}
+	closed := input
+	closed.MergeRequest.State = "closed"
+	source := &gitLabReviewSourceStub{input: gitlab.ReviewInput{MergeRequest: closed.MergeRequest, Project: closed.Project}}
+	core, logs := observer.New(zap.DebugLevel)
+	reconciler := NewReconciler(
+		zap.New(core),
+		source,
+		client,
+		func(review.Input) (workflow.SessionContract, error) { return workflow.SessionContract{}, nil },
+	)
 
-	cancel()
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
-	defer cancelShutdown()
-	require.NoError(t, reconciler.Stop(shutdownCtx))
-	require.NoError(t, <-runDone)
-	require.Equal(t, 1, logs.FilterMessage("cancelled Orpheus review after merge request left reviewer snapshot").Len())
+	reconciler.processSnapshot(context.Background(), reviewSnapshot())
+
+	require.Equal(t, 1, client.cancelCalls)
+	entries := logs.FilterMessage("cancelled stale Orpheus review session").All()
+	require.Len(t, entries, 1)
+	require.Equal(t, "mr_not_open", entries[0].ContextMap()["cancellation_reason"])
 }
 
 func TestReconcilerRetriesTransientCancellationOnNextSnapshot(t *testing.T) {
+	input := eligibleReviewInput()
+	metadata := recoveredMetadata(t, input)
 	cancelCalls := 0
 	client := &orpheusMock{
-		find: func(context.Context, orpheus.ReviewSessionKey) ([]orpheus.Session, error) {
-			return []orpheus.Session{{ID: "session-1", RunID: "run-1", Status: "running"}}, nil
+		active: func(context.Context, string) ([]orpheus.Session, error) {
+			return []orpheus.Session{{ID: "session-1", RunID: "run-1", MRKey: input.MRKey, InputFingerprint: input.ReviewFingerprint, Status: "running"}}, nil
+		},
+		metadata: func(context.Context, string, string, string) (json.RawMessage, error) {
+			return metadata, nil
 		},
 		cancel: func(context.Context, string, string) error {
 			cancelCalls++
@@ -554,32 +770,34 @@ func TestReconcilerRetriesTransientCancellationOnNextSnapshot(t *testing.T) {
 			return nil
 		},
 	}
-	reconciler := NewReconciler(zap.NewNop(), client, func(review.Input) (workflow.SessionContract, error) {
+	removed := input
+	removed.MergeRequest.Reviewers = nil
+	source := &gitLabReviewSourceStub{input: gitlab.ReviewInput{MergeRequest: removed.MergeRequest, Project: removed.Project}}
+	reconciler := NewReconciler(zap.NewNop(), source, client, func(review.Input) (workflow.SessionContract, error) {
 		return workflow.SessionContract{}, nil
 	})
 
-	reconciler.processSnapshot(context.Background(), review.Snapshot{Inputs: []review.Input{eligibleReviewInput()}})
-	reconciler.processSnapshot(context.Background(), review.Snapshot{})
+	reconciler.processSnapshot(context.Background(), reviewSnapshot())
 	require.Equal(t, 1, cancelCalls)
-	reconciler.processSnapshot(context.Background(), review.Snapshot{})
+	reconciler.processSnapshot(context.Background(), reviewSnapshot())
 
 	require.Equal(t, 2, cancelCalls)
-	require.Empty(t, reconciler.removed)
 }
 
 func TestReconcilerSubmitRejectsDuplicateKeysAndDoesNotBlockWhenFull(t *testing.T) {
 	reconciler := NewReconciler(
 		zap.NewNop(),
+		nil,
 		concurrentOrpheusStub{},
 		func(review.Input) (workflow.SessionContract, error) { return workflow.SessionContract{}, nil },
 		ReconcilerConfig{WorkerCount: 1, QueueCapacity: 1},
 	)
 	input := eligibleReviewInput()
 
-	require.Error(t, reconciler.Submit(context.Background(), review.Snapshot{Inputs: []review.Input{input, input}}))
-	require.NoError(t, reconciler.Submit(context.Background(), review.Snapshot{Inputs: []review.Input{input}}))
+	require.Error(t, reconciler.Submit(context.Background(), reviewSnapshot(input, input)))
+	require.NoError(t, reconciler.Submit(context.Background(), reviewSnapshot(input)))
 	require.Len(t, reconciler.queue, 1)
-	require.ErrorIs(t, reconciler.Submit(context.Background(), review.Snapshot{Inputs: []review.Input{anotherEligibleReviewInput()}}), ErrReconcileQueueFull)
+	require.ErrorIs(t, reconciler.Submit(context.Background(), reviewSnapshot(anotherEligibleReviewInput())), ErrReconcileQueueFull)
 	require.Len(t, reconciler.queue, 1)
 }
 
@@ -594,6 +812,7 @@ func TestReconcilerGracefulShutdownDrainsAcceptedInputs(t *testing.T) {
 	core, logs := observer.New(zap.DebugLevel)
 	reconciler := NewReconciler(
 		zap.New(core),
+		nil,
 		client,
 		func(review.Input) (workflow.SessionContract, error) { return workflow.SessionContract{}, nil },
 		ReconcilerConfig{WorkerCount: 1, QueueCapacity: 1},
@@ -602,7 +821,7 @@ func TestReconcilerGracefulShutdownDrainsAcceptedInputs(t *testing.T) {
 	runDone := make(chan error, 1)
 	go func() { runDone <- reconciler.Run(ctx) }()
 	<-reconciler.started
-	require.NoError(t, reconciler.Submit(context.Background(), review.Snapshot{Inputs: []review.Input{eligibleReviewInput()}}))
+	require.NoError(t, reconciler.Submit(context.Background(), reviewSnapshot(eligibleReviewInput())))
 	<-started
 	cancel()
 	stopDone := make(chan error, 1)
@@ -622,7 +841,7 @@ func TestReconcilerGracefulShutdownDrainsAcceptedInputs(t *testing.T) {
 	require.NoError(t, <-runDone)
 	require.Equal(t, 1, logs.FilterMessage("stopping review reconciler").Len())
 	require.Equal(t, 1, logs.FilterMessage("review reconciler stopped").Len())
-	require.ErrorIs(t, reconciler.Submit(context.Background(), review.Snapshot{Inputs: []review.Input{anotherEligibleReviewInput()}}), ErrReconcilerStopping)
+	require.ErrorIs(t, reconciler.Submit(context.Background(), reviewSnapshot(anotherEligibleReviewInput())), ErrReconcilerStopping)
 }
 
 func TestReconcilerCancelsActiveRequestsAfterShutdownTimeout(t *testing.T) {
@@ -637,6 +856,7 @@ func TestReconcilerCancelsActiveRequestsAfterShutdownTimeout(t *testing.T) {
 	core, logs := observer.New(zap.DebugLevel)
 	reconciler := NewReconciler(
 		zap.New(core),
+		nil,
 		client,
 		func(review.Input) (workflow.SessionContract, error) { return workflow.SessionContract{}, nil },
 		ReconcilerConfig{WorkerCount: 1, QueueCapacity: 1},
@@ -645,7 +865,7 @@ func TestReconcilerCancelsActiveRequestsAfterShutdownTimeout(t *testing.T) {
 	runDone := make(chan error, 1)
 	go func() { runDone <- reconciler.Run(ctx) }()
 	<-reconciler.started
-	require.NoError(t, reconciler.Submit(context.Background(), review.Snapshot{Inputs: []review.Input{eligibleReviewInput()}}))
+	require.NoError(t, reconciler.Submit(context.Background(), reviewSnapshot(eligibleReviewInput())))
 	<-started
 	cancel()
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Millisecond)
@@ -710,4 +930,44 @@ func anotherEligibleReviewInput() review.Input {
 	input.ReviewFingerprint = strings.Repeat("f", 64)
 	input.MergeRequest.IID = 2990
 	return input
+}
+
+func reviewSnapshot(inputs ...review.Input) review.Snapshot {
+	reviewer := gitlab.User{ID: 42, Username: "reviewer"}
+	return review.Snapshot{Reviewer: reviewer, Inputs: inputs}
+}
+
+func recoveredMetadata(t *testing.T, input review.Input) json.RawMessage {
+	t.Helper()
+	metadata := workflow.MetadataV1{
+		SchemaVersion:    workflow.MetadataSchemaVersion,
+		WorkflowID:       workflow.ID,
+		WorkflowRevision: "sha256:" + strings.Repeat("a", 64),
+		GitLab: workflow.GitLabMetadata{
+			Host:             "https://gitlab.example.com",
+			ProjectID:        input.MergeRequest.ProjectID,
+			ProjectPath:      input.Project.PathWithNamespace,
+			MergeRequestIID:  input.MergeRequest.IID,
+			ReviewerUserID:   input.Reviewer.ID,
+			ReviewerUsername: input.Reviewer.Username,
+		},
+		Review: workflow.ReviewMetadata{
+			DiffFingerprint:   input.DiffFingerprint,
+			ReviewFingerprint: input.ReviewFingerprint,
+			ArtifactsPath:     ".orpheus/reviews/" + input.DiffFingerprint,
+		},
+		DiffRefs: workflow.DiffRefsMetadata{
+			BaseSHA:  input.MergeRequest.DiffRefs.BaseSHA,
+			StartSHA: input.MergeRequest.DiffRefs.StartSHA,
+			HeadSHA:  input.MergeRequest.DiffRefs.HeadSHA,
+		},
+		Protocol: workflow.ProtocolMetadata{
+			ArtifactSchemaVersion: workflow.ArtifactSchemaVersion,
+			BundleSchemaVersion:   workflow.BundleSchemaVersion,
+			HelperSHA256:          "sha256:" + strings.Repeat("b", 64),
+		},
+	}
+	raw, err := json.Marshal(metadata)
+	require.NoError(t, err)
+	return raw
 }

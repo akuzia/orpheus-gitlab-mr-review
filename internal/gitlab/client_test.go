@@ -11,7 +11,19 @@ import (
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/config"
 
 	"github.com/stretchr/testify/require"
+	gitlabapi "gitlab.com/gitlab-org/api/client-go/v3"
 )
+
+func TestIsRetryable(t *testing.T) {
+	t.Parallel()
+
+	require.True(t, IsRetryable(context.DeadlineExceeded))
+	require.True(t, IsRetryable(ErrReviewInputChanged))
+	require.True(t, IsRetryable(&gitlabapi.ErrorResponse{StatusCode: http.StatusTooManyRequests}))
+	require.True(t, IsRetryable(&gitlabapi.ErrorResponse{StatusCode: http.StatusServiceUnavailable}))
+	require.False(t, IsRetryable(&gitlabapi.ErrorResponse{StatusCode: http.StatusNotFound}))
+	require.False(t, IsRetryable(context.Canceled))
+}
 
 func TestGetReviewInputLoadsPaginatedNotesWithoutDiscussions(t *testing.T) {
 	t.Parallel()

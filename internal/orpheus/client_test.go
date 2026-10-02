@@ -82,6 +82,62 @@ func TestFindSessionsUsesExactIdentityAndPaginates(t *testing.T) {
 	}, sessions)
 }
 
+func TestListActiveSessionsReadsLatestRunAndProjectsRecoveryIdentity(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests++
+		require.Equal(t, "Bearer secret", request.Header.Get("Authorization"))
+		response.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/api/v1/sessions":
+			require.Equal(t, http.MethodGet, request.Method)
+			require.Equal(t, "active", request.URL.Query().Get("activity"))
+			require.Equal(t, "gitlab-mr-review", request.URL.Query().Get("namespace"))
+			require.Equal(t, "asc", request.URL.Query().Get("order"))
+			_, _ = io.WriteString(response, `{
+				"items":[{
+					"id":"00000000-0000-4000-8000-000000000001",
+					"last_run_id":"00000000-0000-4000-8000-000000000002",
+					"external_key":"https://gitlab.example.com:42!17",
+					"allow_multiple_runs":false,
+					"status":"running",
+					"created_at":"2026-10-02T10:00:00Z",
+					"last_run_created_at":"2026-10-02T10:00:00Z"
+				}],
+				"next_cursor":null
+			}`)
+		case "/api/v1/sessions/00000000-0000-4000-8000-000000000001/runs/00000000-0000-4000-8000-000000000002":
+			require.Equal(t, http.MethodGet, request.Method)
+			_, _ = io.WriteString(response, `{
+				"id":"00000000-0000-4000-8000-000000000002",
+				"session_id":"00000000-0000-4000-8000-000000000001",
+				"status":"running",
+				"input_fingerprint":"review-fingerprint",
+				"created_at":"2026-10-02T10:00:00Z"
+			}`)
+		default:
+			http.Error(response, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client := newTestClient(t, server.URL)
+
+	sessions, err := client.ListActiveSessions(context.Background(), "gitlab-mr-review")
+
+	require.NoError(t, err)
+	require.Equal(t, 2, requests)
+	require.Equal(t, []Session{{
+		ID:               "00000000-0000-4000-8000-000000000001",
+		RunID:            "00000000-0000-4000-8000-000000000002",
+		MRKey:            "https://gitlab.example.com:42!17",
+		Status:           "running",
+		InputFingerprint: "review-fingerprint",
+		CreatedAt:        time.Date(2026, 10, 2, 10, 0, 0, 0, time.UTC),
+	}}, sessions)
+}
+
 func TestFindSessionsRejectsRepeatedCursor(t *testing.T) {
 	t.Parallel()
 

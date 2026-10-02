@@ -72,6 +72,7 @@ func New(cfg config.Config) (*App, error) {
 
 	reconciler := connector.NewReconciler(
 		logger,
+		gitLabClient,
 		orpheusClient,
 		func(input review.Input) (workflow.SessionContract, error) {
 			return workflow.BuildSessionContract(input, contractOptions)
@@ -79,6 +80,7 @@ func New(cfg config.Config) (*App, error) {
 		connector.ReconcilerConfig{
 			WorkerCount:   cfg.ReconcileWorkerCount,
 			QueueCapacity: cfg.ReconcileQueueCapacity,
+			MaxConcurrent: cfg.MaxConcurrentReviews,
 		},
 	)
 	watcher := connector.NewWatcher(logger, gitLabClient, reconciler, connector.WatcherConfig{

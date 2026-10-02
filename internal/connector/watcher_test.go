@@ -153,6 +153,7 @@ func TestWatcherPollFetchesAndPassesCompleteSnapshotToReconciler(t *testing.T) {
 
 	require.Equal(t, 1, client.reviewInputCalls)
 	require.Len(t, inputSink.snapshots, 1)
+	require.Equal(t, reviewer, inputSink.snapshots[0].Reviewer)
 	require.Len(t, inputSink.snapshots[0].Inputs, 1)
 	require.Equal(t, "https://gitlab.example.com:74!2989", inputSink.snapshots[0].Inputs[0].MRKey)
 	require.NotEmpty(t, inputSink.snapshots[0].Inputs[0].DiffFingerprint)

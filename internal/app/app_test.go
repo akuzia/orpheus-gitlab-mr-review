@@ -32,6 +32,7 @@ func TestNewRegistersIndependentWatcherAndReconcilerServices(t *testing.T) {
 		MaxSessionRequestBytes: 1 << 20,
 		ReconcileWorkerCount:   3,
 		ReconcileQueueCapacity: 12,
+		MaxConcurrentReviews:   5,
 		GitLab: config.GitLab{
 			BaseURL: "https://gitlab.example.com",
 			Token:   "gitlab-token",

@@ -33,6 +33,27 @@ func DecodeMetadata(raw json.RawMessage) (MetadataV1, error) {
 }
 
 func ValidateMetadata(metadata MetadataV1, input review.Input) error {
+	if err := ValidateRecoveredMetadata(metadata, input.MRKey, input.ReviewFingerprint, input.Reviewer.ID); err != nil {
+		return err
+	}
+	switch {
+	case metadata.GitLab.ProjectID != input.MergeRequest.ProjectID || metadata.GitLab.MergeRequestIID != input.MergeRequest.IID:
+		return errors.New("validate workflow metadata: GitLab identity mismatch")
+	case metadata.Review.DiffFingerprint != input.DiffFingerprint:
+		return errors.New("validate workflow metadata: review fingerprint mismatch")
+	case metadata.DiffRefs.BaseSHA != input.MergeRequest.DiffRefs.BaseSHA ||
+		metadata.DiffRefs.StartSHA != input.MergeRequest.DiffRefs.StartSHA ||
+		metadata.DiffRefs.HeadSHA != input.MergeRequest.DiffRefs.HeadSHA:
+		return errors.New("validate workflow metadata: diff refs mismatch")
+	}
+
+	return nil
+}
+
+// ValidateRecoveredMetadata validates the immutable identity needed to recover
+// an existing review session without requiring its current GitLab state to
+// still match the reviewed diff.
+func ValidateRecoveredMetadata(metadata MetadataV1, mrKey, reviewFingerprint string, reviewerID int64) error {
 	expectedMRKey := fmt.Sprintf("%s:%d!%d", metadata.GitLab.Host, metadata.GitLab.ProjectID, metadata.GitLab.MergeRequestIID)
 	switch {
 	case metadata.SchemaVersion != MetadataSchemaVersion:
@@ -47,20 +68,16 @@ func ValidateMetadata(metadata MetadataV1, input review.Input) error {
 		return errors.New("validate workflow metadata: unsupported bundle schema version")
 	case !digestPattern.MatchString(metadata.Protocol.HelperSHA256):
 		return errors.New("validate workflow metadata: invalid helper digest")
-	case expectedMRKey != input.MRKey:
+	case expectedMRKey != mrKey:
 		return errors.New("validate workflow metadata: merge request identity mismatch")
-	case metadata.GitLab.ProjectID != input.MergeRequest.ProjectID || metadata.GitLab.MergeRequestIID != input.MergeRequest.IID:
-		return errors.New("validate workflow metadata: GitLab identity mismatch")
-	case metadata.GitLab.ReviewerUserID != input.Reviewer.ID:
+	case metadata.GitLab.ReviewerUserID != reviewerID:
 		return errors.New("validate workflow metadata: reviewer identity mismatch")
-	case metadata.Review.DiffFingerprint != input.DiffFingerprint || metadata.Review.ReviewFingerprint != input.ReviewFingerprint:
+	case metadata.Review.ReviewFingerprint != reviewFingerprint:
 		return errors.New("validate workflow metadata: review fingerprint mismatch")
-	case metadata.Review.ArtifactsPath != ".orpheus/reviews/"+input.DiffFingerprint:
+	case metadata.Review.ArtifactsPath != ".orpheus/reviews/"+metadata.Review.DiffFingerprint:
 		return errors.New("validate workflow metadata: artifacts path mismatch")
-	case metadata.DiffRefs.BaseSHA != input.MergeRequest.DiffRefs.BaseSHA ||
-		metadata.DiffRefs.StartSHA != input.MergeRequest.DiffRefs.StartSHA ||
-		metadata.DiffRefs.HeadSHA != input.MergeRequest.DiffRefs.HeadSHA:
-		return errors.New("validate workflow metadata: diff refs mismatch")
+	case metadata.DiffRefs.BaseSHA == "" || metadata.DiffRefs.StartSHA == "" || metadata.DiffRefs.HeadSHA == "":
+		return errors.New("validate workflow metadata: incomplete diff refs")
 	}
 
 	return nil

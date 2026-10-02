@@ -158,12 +158,19 @@ eligibility и владеет всем дальнейшим Orpheus/GitLab lifec
 неблокирующий submit и никогда не ждёт Orpheus HTTP request. Snapshot публикуется только после
 полностью успешного list/fetch цикла; частичный результат не может выглядеть как удаление reviewer.
 Snapshots обрабатываются последовательно, а разные MR внутри одного snapshot — ограниченным worker
-pool размером `RECONCILE_WORKER_COUNT`. Сравнение двух последовательных полных snapshots обнаруживает
-MR, исчезнувшие из reviewer selection, и запускает для их exact session идемпотентный `CancelRun`.
+pool размером `RECONCILE_WORKER_COUNT`. Перед admission Reconciler получает из Orpheus snapshot всех
+активных sessions workflow namespace. Сравнение GitLab snapshot с Orpheus snapshot обнаруживает MR,
+исчезнувшие из reviewer selection, включая исчезнувшие до рестарта connector-а, и запускает для их
+exact session идемпотентный `CancelRun`.
 При заполненной очереди snapshot не блокирует polling и будет собран заново следующим poll;
 `RECONCILE_QUEUE_CAPACITY` ограничивает число ожидающих snapshots. Это не подменяет
 `MAX_CONCURRENT_REVIEWS`: последний ограничивает число активных Orpheus sessions, а не число коротких
 reconciliation calls.
+
+Каждый tick разделён на read/reconcile и create phases. До первой `CreateSession` connector читает
+active sessions и выполняет exact lookup для всех кандидатов. Любая transient ошибка read/reconcile
+phase прекращает tick без новых sessions. После успешной read phase отсутствующие sessions создаются
+в порядке GitLab snapshot, пока число активных reviews не достигнет `MAX_CONCURRENT_REVIEWS`.
 
 При graceful shutdown новые snapshots больше не принимаются, уже принятая очередь дренируется, а
 активные Orpheus requests получают shutdown deadline. Analysis retries из этой очереди не создаются:
