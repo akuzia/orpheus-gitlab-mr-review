@@ -568,7 +568,7 @@ func (r *Reconciler) inspectCandidate(ctx context.Context, input review.Input) (
 		}
 	}
 	if r.orpheus == nil || r.buildContract == nil {
-		return false, lifecycleError(LifecyclePhaseBuild, "reconciler_not_configured", false, errors.New("Orpheus dependencies are missing"))
+		return false, lifecycleError(LifecyclePhaseBuild, "reconciler_not_configured", false, errors.New("orpheus dependencies are missing"))
 	}
 
 	key := orpheus.ReviewSessionKey{
@@ -677,12 +677,12 @@ func (r *Reconciler) reconcileSession(ctx context.Context, input review.Input, s
 		fields = append(fields, zap.String("orpheus_error_code", session.ErrorCode))
 		r.logger.Warn("Orpheus review session failed without analysis retry", fields...)
 		if r.publisher != nil {
-			return r.finishFailure(ctx, input, session, lifecycleError(LifecyclePhaseRead, "run_failed", false, errors.New("Orpheus run failed")))
+			return r.finishFailure(ctx, input, session, lifecycleError(LifecyclePhaseRead, "run_failed", false, errors.New("orpheus run failed")))
 		}
 	case "cancelled":
 		r.logger.Warn("Orpheus review session was cancelled without analysis retry", fields...)
 		if r.publisher != nil {
-			return r.finishFailure(ctx, input, session, lifecycleError(LifecyclePhaseRead, "run_cancelled", false, errors.New("Orpheus run was cancelled")))
+			return r.finishFailure(ctx, input, session, lifecycleError(LifecyclePhaseRead, "run_cancelled", false, errors.New("orpheus run was cancelled")))
 		}
 	default:
 		return r.finishFailure(ctx, input, session,

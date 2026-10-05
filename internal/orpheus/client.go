@@ -447,7 +447,7 @@ func decode[T any](response *http.Response, requestErr error, expectedStatuses .
 		return result, requestErr
 	}
 	if response == nil {
-		return result, errors.New("empty Orpheus response")
+		return result, errors.New("empty orpheus response")
 	}
 	defer func() {
 		_ = response.Body.Close()
@@ -458,7 +458,7 @@ func decode[T any](response *http.Response, requestErr error, expectedStatuses .
 		return result, err
 	}
 	if len(body) > maxResponseSize {
-		return result, errors.New("Orpheus response exceeds size limit")
+		return result, errors.New("orpheus response exceeds size limit")
 	}
 	expected := false
 	for _, status := range expectedStatuses {
