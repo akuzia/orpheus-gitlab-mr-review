@@ -75,7 +75,8 @@ func TestBuildSessionContract(t *testing.T) {
 	require.Equal(t, 120, *request.Configuration.Hooks.TimeoutSeconds)
 	require.Contains(t, *request.Configuration.Hooks.BeforeRun, "git checkout --detach")
 	require.Contains(t, *request.Configuration.Hooks.AfterRun, "exec python3")
-	require.Equal(t, input.Project.SSHURLToRepo, (*request.Env)["ORPHEUS_GITLAB_PROJECT_CLONE_URL"])
+	require.Equal(t, input.Project.HTTPURLToRepo, (*request.Env)["ORPHEUS_GITLAB_PROJECT_CLONE_URL"])
+	require.Equal(t, input.Project.HTTPURLToRepo, (*request.Configuration.Sandbox.Env)["ORPHEUS_GITLAB_PROJECT_CLONE_URL"])
 	require.Equal(t, input.MergeRequest.DiffRefs.HeadSHA, (*request.Configuration.Sandbox.Env)["ORPHEUS_GITLAB_DIFF_HEAD_SHA"])
 	require.Equal(t, 3600, *request.Configuration.Limits.RunTimeoutSeconds)
 	require.Len(t, request.Messages, 1)
@@ -132,6 +133,38 @@ func TestBuildSessionContractOmitsUnselectedServices(t *testing.T) {
 		require.NoError(t, err)
 		require.NotContains(t, string(encoded), `"services"`)
 	}
+}
+
+func TestBuildSessionContractRequiresHTTPSCloneURL(t *testing.T) {
+	t.Parallel()
+
+	for _, cloneURL := range []string{"", " \t"} {
+		input := contractReviewInput()
+		input.Project.HTTPURLToRepo = cloneURL
+		_, err := BuildSessionContract(input, contractOptions())
+		require.EqualError(t, err, "build session contract: project HTTPS clone URL is required")
+	}
+	for _, cloneURL := range []string{
+		"http://gitlab.example.com/team/project.git",
+		"git@gitlab.example.com:team/project.git",
+		"ssh://git@gitlab.example.com/team/project.git",
+		"file:///tmp/project.git",
+		"/tmp/project.git",
+		"https:///team/project.git",
+		"https://:443/team/project.git",
+		"https://gitlab.example.com/%zz",
+	} {
+		input := contractReviewInput()
+		input.Project.HTTPURLToRepo = cloneURL
+		_, err := BuildSessionContract(input, contractOptions())
+		require.EqualError(t, err, "build session contract: project clone URL must be an absolute HTTPS URL")
+	}
+
+	input := contractReviewInput()
+	input.Project.HTTPURLToRepo = "  " + input.Project.HTTPURLToRepo + " \t"
+	contract, err := BuildSessionContract(input, contractOptions())
+	require.NoError(t, err)
+	require.Equal(t, strings.TrimSpace(input.Project.HTTPURLToRepo), (*contract.Request.Env)["ORPHEUS_GITLAB_PROJECT_CLONE_URL"])
 }
 
 func TestSessionContractIsDeterministic(t *testing.T) {
@@ -308,17 +341,18 @@ func TestRenderedHooksPreparePinnedCheckoutAndProduceBundle(t *testing.T) {
 	require.NoError(t, os.Mkdir(workspace, 0o700))
 
 	input := contractReviewInput()
-	input.Project.SSHURLToRepo = ""
-	input.Project.HTTPURLToRepo = origin
 	input.MergeRequest.DiffRefs.BaseSHA = baseSHA
 	input.MergeRequest.DiffRefs.StartSHA = baseSHA
 	input.MergeRequest.DiffRefs.HeadSHA = headSHA
 	contract, err := BuildSessionContract(input, contractOptions())
 	require.NoError(t, err)
+	// Exercise the hook commands against a local repository without network authentication.
+	hooks, err := renderHooks(contract.Metadata, origin, input.MergeRequest.IID, contractOptions().HookTimeoutSeconds)
+	require.NoError(t, err)
 
-	before := exec.Command("sh", "-c", *contract.Request.Configuration.Hooks.BeforeRun)
+	before := exec.Command("sh", "-c", *hooks.Hooks.BeforeRun)
 	before.Dir = workspace
-	before.Env = hookEnvironment(*contract.Request.Env)
+	before.Env = hookEnvironment(hooks.Environment)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	before.Stdout = &stdout
@@ -345,9 +379,9 @@ recurrence_comment: "The guard is still missing on the same parser path."
 
 The changed behavior needs an explicit guard.
 `), 0o600))
-	after := exec.Command("sh", "-c", *contract.Request.Configuration.Hooks.AfterRun)
+	after := exec.Command("sh", "-c", *hooks.Hooks.AfterRun)
 	after.Dir = workspace
-	after.Env = hookEnvironment(*contract.Request.Env)
+	after.Env = hookEnvironment(hooks.Environment)
 	after.Stderr = &stderr
 	output, err := after.Output()
 	require.NoError(t, err, stderr.String())

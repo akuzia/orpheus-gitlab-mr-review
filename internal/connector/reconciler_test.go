@@ -603,6 +603,8 @@ func TestReconcilerAndAdapterHTTPContract(t *testing.T) {
 			configuration := body["configuration"].(map[string]any)
 			sandbox := configuration["sandbox"].(map[string]any)
 			require.Equal(t, []any{"gitlab", "redmine"}, sandbox["services"])
+			env := sandbox["env"].(map[string]any)
+			require.Equal(t, "https://gitlab.example.com/team/project.git", env["ORPHEUS_GITLAB_PROJECT_CLONE_URL"])
 			require.NotContains(t, body, "services")
 			hooks := configuration["hooks"].(map[string]any)
 			require.Contains(t, hooks["before_run"], "git checkout --detach")
@@ -1051,6 +1053,7 @@ func eligibleReviewInput() review.Input {
 		Project: gitlab.Project{
 			ID:                74,
 			PathWithNamespace: "team/project",
+			HTTPURLToRepo:     "https://gitlab.example.com/team/project.git",
 			SSHURLToRepo:      "git@gitlab.example.com:team/project.git",
 		},
 		MergeRequest: gitlab.MergeRequest{

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"text/template"
@@ -64,7 +65,7 @@ func BuildSessionContract(input review.Input, options Options) (SessionContract,
 	metadata := newMetadata(input, options.GitLabHost, artifactsPath, revision, helperSHA256)
 	hooks, err := renderHooks(
 		metadata,
-		projectCloneURL(input.Project.HTTPURLToRepo, input.Project.SSHURLToRepo),
+		strings.TrimSpace(input.Project.HTTPURLToRepo),
 		input.MergeRequest.IID,
 		options.HookTimeoutSeconds,
 	)
@@ -182,8 +183,8 @@ func validateInput(input review.Input) error {
 		return errors.New("build session contract: merge request IID must be positive")
 	case strings.TrimSpace(input.Project.PathWithNamespace) == "":
 		return errors.New("build session contract: project path is required")
-	case projectCloneURL(input.Project.HTTPURLToRepo, input.Project.SSHURLToRepo) == "":
-		return errors.New("build session contract: project clone URL is required")
+	case strings.TrimSpace(input.Project.HTTPURLToRepo) == "":
+		return errors.New("build session contract: project HTTPS clone URL is required")
 	case strings.TrimSpace(input.MergeRequest.WebURL) == "":
 		return errors.New("build session contract: merge request URL is required")
 	case input.Reviewer.ID <= 0:
@@ -198,6 +199,10 @@ func validateInput(input review.Input) error {
 		return errors.New("build session contract: start SHA is required")
 	case strings.TrimSpace(input.MergeRequest.DiffRefs.HeadSHA) == "":
 		return errors.New("build session contract: head SHA is required")
+	}
+	cloneURL, err := url.Parse(strings.TrimSpace(input.Project.HTTPURLToRepo))
+	if err != nil || cloneURL.Scheme != "https" || cloneURL.Hostname() == "" {
+		return errors.New("build session contract: project clone URL must be an absolute HTTPS URL")
 	}
 
 	return nil
