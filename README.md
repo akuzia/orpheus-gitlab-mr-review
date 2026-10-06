@@ -54,6 +54,21 @@ ORPHEUS_AGENT_INSTRUCTION_FILES=/var/app/instructions/review-policy.md
 `ORPHEUS_AGENT_INSTRUCTION_FILES` selects the custom review instructions described below.
 `ORPHEUS_AGENT_MODEL` may be set to override the model selected by the Orpheus profile.
 
+`ORPHEUS_SERVICES` selects the services available to the review agent and session hooks and defaults to
+`gitlab`. Add other service codes when required by the review instructions:
+
+```dotenv
+ORPHEUS_SERVICES=gitlab,redmine
+```
+
+The connector sends this list as `configuration.sandbox.services`. Service codes must already be
+configured in Orpheus, together with their credential environment variables. This requires an Orpheus
+server that supports services (v0.6.0 or later); selecting an unknown code rejects the session request.
+An unset value uses `gitlab`; an explicitly blank value omits the field. Spaces around codes are trimmed;
+duplicates and invalid codes are rejected at startup. Codes must start with a lowercase letter, contain
+only lowercase letters, digits, `_` or `-`, and be at most 64 characters long. The connector's `GITLAB_TOKEN` authenticates the
+connector itself; it does not select services or supply credentials to the agent.
+
 Timeout settings use integer seconds. The defaults in `.env.dist` are suitable for an initial run.
 
 ## Custom review instructions
