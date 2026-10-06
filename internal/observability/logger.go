@@ -14,6 +14,15 @@ func NewLogger(level string) (*zap.Logger, error) {
 		return nil, fmt.Errorf("parse log level: %w", err)
 	}
 
+	return newLogger(parsedLevel), nil
+}
+
+// NewStartupLogger reports failures even when configuration cannot be loaded.
+func NewStartupLogger() *zap.Logger {
+	return newLogger(zapcore.ErrorLevel)
+}
+
+func newLogger(level zapcore.Level) *zap.Logger {
 	encoderConfig := zapcore.EncoderConfig{
 		MessageKey:     "msg",
 		LevelKey:       "level",
@@ -24,7 +33,7 @@ func NewLogger(level string) (*zap.Logger, error) {
 		EncodeDuration: zapcore.StringDurationEncoder,
 	}
 
-	core := zapcore.NewCore(zapcore.NewConsoleEncoder(encoderConfig), os.Stdout, parsedLevel)
+	core := zapcore.NewCore(zapcore.NewJSONEncoder(encoderConfig), os.Stdout, level)
 
-	return zap.New(core), nil
+	return zap.New(core)
 }
