@@ -21,11 +21,15 @@ A CLI connector that triggers GitLab merge request review through Orpheus.
 - GitLab bot user with an API token and access to the projects it should review;
 - Orpheus API key, agent profile, and sandbox template;
 - one or more mounted Markdown files with general review instructions;
-- read-only repository and `glab` authentication inside the Orpheus sandbox template;
+- read-only repository access over HTTPS and `glab` authentication inside the Orpheus sandbox template;
 - Git, Python 3, `base64`, `gzip`, and `sha256sum` in the sandbox.
 
 The connector communicates only with GitLab and the Orpheus API. AgentBox execution is managed by
 Orpheus.
+
+The connector clones repositories over HTTPS using GitLab's `http_url_to_repo`. The sandbox must
+provide Git authentication for private repositories over HTTPS. A missing or invalid HTTPS clone URL
+rejects the session contract; HTTP and SSH clone URLs are not accepted.
 
 ## Configuration
 

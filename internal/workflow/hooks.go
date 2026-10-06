@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/orpheus"
 )
@@ -154,12 +153,4 @@ func compressedBase64(value string) (string, error) {
 	}
 
 	return base64.StdEncoding.EncodeToString(compressed.Bytes()), nil
-}
-
-func projectCloneURL(httpURL, sshURL string) string {
-	if value := strings.TrimSpace(sshURL); value != "" {
-		return value
-	}
-
-	return strings.TrimSpace(httpURL)
 }
