@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -284,6 +285,12 @@ func TestCreateSessionIsAtomicAndUsesStableIdentityKey(t *testing.T) {
 		require.Equal(t, "/api/v1/sessions", request.URL.Path)
 		require.Equal(t, "Bearer secret", request.Header.Get("Authorization"))
 		idempotencyKeys = append(idempotencyKeys, request.Header.Get("Idempotency-Key"))
+		if _, err := uuid.Parse(request.Header.Get("Idempotency-Key")); err != nil {
+			response.Header().Set("Content-Type", "application/json")
+			response.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = io.WriteString(response, `{"error":{"code":"idempotency_key_required"}}`)
+			return
+		}
 
 		var body map[string]any
 		require.NoError(t, json.NewDecoder(request.Body).Decode(&body))
@@ -321,12 +328,14 @@ func TestCreateSessionIsAtomicAndUsesStableIdentityKey(t *testing.T) {
 		MessageID: messageID,
 	}, accepted)
 
-	_, err = client.CreateSession(context.Background(), testReviewSessionKey(), 42, request)
+	// Recreate the client to verify the key survives a connector restart.
+	restartedClient := newTestClient(t, server.URL)
+	_, err = restartedClient.CreateSession(context.Background(), testReviewSessionKey(), 42, request)
 	require.NoError(t, err)
 	require.Equal(t, idempotencyKeys[0], idempotencyKeys[1])
 	require.Equal(t, requestBodies[0], requestBodies[1])
 	require.Equal(t,
-		"gitlab-mr-review-session-v1:72ed775cd2d796ee9f10a25818d20bafe4f9b79610b287287c44768a5dab48da",
+		"96483226-2430-578b-a7ea-e7bfc96700f7",
 		idempotencyKeys[0],
 	)
 }

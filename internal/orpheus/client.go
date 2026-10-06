@@ -3,7 +3,6 @@ package orpheus
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -537,9 +536,8 @@ func sessionIdempotencyKey(key ReviewSessionKey, reviewerID int64) string {
 		ReviewerID:        reviewerID,
 		ReviewFingerprint: key.ReviewFingerprint,
 	})
-	sum := sha256.Sum256(payload)
-
-	return fmt.Sprintf("gitlab-mr-review-session-v1:%x", sum)
+	// Keep the name encoding stable so retries and restarts reuse the same UUID v5.
+	return uuid.NewSHA1(uuid.NameSpaceURL, append([]byte("gitlab-mr-review-session-v1:"), payload...)).String()
 }
 
 func sessionFromAPI(item api.Run) (Session, error) {
