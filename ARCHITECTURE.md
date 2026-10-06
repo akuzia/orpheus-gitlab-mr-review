@@ -99,7 +99,9 @@ The admission phase then inspects current candidates with a bounded worker pool.
 
 `MAX_CONCURRENT_REVIEWS` limits active review Sessions. Excess candidates remain assigned and are
 reconsidered later. A stable `Idempotency-Key` protects `CreateSession` against a lost or uncertain
-HTTP response.
+HTTP response. The key is a UUID v5 derived from the versioned canonical review identity: namespace,
+merge request key, reviewer ID, and review fingerprint. It is recomputed after restart and requires no
+local persistence. The UUID namespace, name prefix, and payload encoding remain stable across retries.
 
 ### 3.4 Orpheus Session contract
 
