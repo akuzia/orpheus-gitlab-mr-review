@@ -109,6 +109,11 @@ docker compose logs -f air
 
 The process runs until it receives `SIGINT` or `SIGTERM` and performs bounded graceful shutdown.
 
+All application logs are newline-delimited JSON on stdout, including startup failures before
+configuration is loaded. Each record contains `timestamp`, `level`, and `msg`; errors include an
+`error` field. Configuration, initialization, and runtime failures exit with code 1. Startup failures
+are reported regardless of `LOG_LEVEL`.
+
 ## Run with Docker
 
 The instruction path in `.env` must match its path inside the container:
