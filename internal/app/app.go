@@ -66,6 +66,7 @@ func New(cfg config.Config) (*App, error) {
 		AgentProfile:       cfg.Orpheus.AgentProfile,
 		AgentModel:         cfg.Orpheus.AgentModel,
 		SandboxTemplate:    cfg.Orpheus.SandboxTemplate,
+		Services:           cfg.Orpheus.Services,
 		RunTimeoutSeconds:  int(cfg.RunTimeout / time.Second),
 		HookTimeoutSeconds: int(cfg.HookTimeout / time.Second),
 		MaxRequestBytes:    cfg.MaxSessionRequestBytes,

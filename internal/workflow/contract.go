@@ -21,6 +21,7 @@ type Options struct {
 	AgentProfile       string
 	AgentModel         string
 	SandboxTemplate    string
+	Services           []string
 	RunTimeoutSeconds  int
 	HookTimeoutSeconds int
 	MaxRequestBytes    int
@@ -114,6 +115,9 @@ func BuildSessionContract(input review.Input, options Options) (SessionContract,
 	}
 	if options.AgentModel != "" {
 		request.Configuration.Agent.Model = &options.AgentModel
+	}
+	if len(options.Services) > 0 {
+		request.Configuration.Sandbox.Services = new(append([]string(nil), options.Services...))
 	}
 
 	encodedRequest, err := json.Marshal(request)

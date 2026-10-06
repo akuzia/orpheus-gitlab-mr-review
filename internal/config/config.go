@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +19,8 @@ const maximumSessionRequestBytes = 16 << 20
 const maximumReconcileWorkerCount = 64
 const maximumReconcileQueueCapacity = 4096
 const maximumConcurrentReviews = 1024
+
+var serviceCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
 
 const (
 	ModeDevelopment Mode = "dev"
@@ -56,6 +59,7 @@ type Orpheus struct {
 	AgentProfile     string
 	AgentModel       string
 	SandboxTemplate  string
+	Services         []string
 	InstructionFiles []string
 }
 
@@ -72,6 +76,7 @@ func Load() (Config, error) {
 	v.SetDefault("reconcile_worker_count", 4)
 	v.SetDefault("reconcile_queue_capacity", 128)
 	v.SetDefault("max_concurrent_reviews", 4)
+	v.SetDefault("orpheus_services", "gitlab")
 	v.AutomaticEnv()
 
 	if _, err := os.Stat(".env"); err == nil {
@@ -165,6 +170,15 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	servicesValue := v.GetString("orpheus_services")
+	// Viper ignores empty environment values; an explicit empty list disables services.
+	if value, exists := os.LookupEnv("ORPHEUS_SERVICES"); exists {
+		servicesValue = value
+	}
+	services, err := parseServices(servicesValue)
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		Mode:                   mode,
@@ -189,6 +203,7 @@ func Load() (Config, error) {
 			AgentProfile:     agentProfile,
 			AgentModel:       strings.TrimSpace(v.GetString("orpheus_agent_model")),
 			SandboxTemplate:  sandboxTemplate,
+			Services:         services,
 			InstructionFiles: instructionFiles,
 		},
 	}, nil
@@ -234,6 +249,22 @@ func parsePositiveInt(name, value string, maximum int) (int, error) {
 	}
 
 	return int(parsed), nil
+}
+
+func parseServices(value string) ([]string, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	services, err := parseOrderedList("ORPHEUS_SERVICES", value)
+	if err != nil {
+		return nil, err
+	}
+	for _, service := range services {
+		if !serviceCodePattern.MatchString(service) {
+			return nil, fmt.Errorf("ORPHEUS_SERVICES contains invalid service code %q", service)
+		}
+	}
+	return services, nil
 }
 
 func parseOrderedList(name, value string) ([]string, error) {

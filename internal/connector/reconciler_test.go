@@ -601,6 +601,9 @@ func TestReconcilerAndAdapterHTTPContract(t *testing.T) {
 			require.Equal(t, workflow.ID, body["namespace"])
 			require.Equal(t, false, body["allow_multiple_runs"])
 			configuration := body["configuration"].(map[string]any)
+			sandbox := configuration["sandbox"].(map[string]any)
+			require.Equal(t, []any{"gitlab", "redmine"}, sandbox["services"])
+			require.NotContains(t, body, "services")
 			hooks := configuration["hooks"].(map[string]any)
 			require.Contains(t, hooks["before_run"], "git checkout --detach")
 			require.Contains(t, hooks["after_run"], "exec python3")
@@ -629,6 +632,7 @@ func TestReconcilerAndAdapterHTTPContract(t *testing.T) {
 			Instructions:       "# Project policy\n\nReview the pinned diff.\n",
 			AgentProfile:       "review-profile",
 			SandboxTemplate:    "review-sandbox",
+			Services:           []string{"gitlab", "redmine"},
 			RunTimeoutSeconds:  3600,
 			HookTimeoutSeconds: 120,
 			MaxRequestBytes:    1 << 20,

@@ -68,6 +68,8 @@ func TestBuildSessionContract(t *testing.T) {
 	require.Equal(t, "gpt-review", *request.Configuration.Agent.Model)
 	require.Equal(t, testInstructions, *request.Configuration.Agent.Instructions)
 	require.Equal(t, "review-sandbox", request.Configuration.Sandbox.Template)
+	require.Equal(t, []string{"gitlab", "redmine"}, *request.Configuration.Sandbox.Services)
+	require.Nil(t, request.Services)
 	require.Equal(t, contract.Metadata.Protocol.HelperSHA256, helperDigest())
 	require.NotNil(t, request.Configuration.Hooks)
 	require.Equal(t, 120, *request.Configuration.Hooks.TimeoutSeconds)
@@ -116,6 +118,20 @@ func TestBuildSessionContract(t *testing.T) {
 	encodedRequest, err := json.Marshal(request)
 	require.NoError(t, err)
 	require.Equal(t, len(encodedRequest), contract.RequestBytes)
+}
+
+func TestBuildSessionContractOmitsUnselectedServices(t *testing.T) {
+	t.Parallel()
+
+	for _, services := range [][]string{nil, {}} {
+		options := contractOptions()
+		options.Services = services
+		contract, err := BuildSessionContract(contractReviewInput(), options)
+		require.NoError(t, err)
+		encoded, err := json.Marshal(contract.Request)
+		require.NoError(t, err)
+		require.NotContains(t, string(encoded), `"services"`)
+	}
 }
 
 func TestSessionContractIsDeterministic(t *testing.T) {
@@ -417,6 +433,7 @@ func contractOptions() Options {
 		AgentProfile:       "review-profile",
 		AgentModel:         "gpt-review",
 		SandboxTemplate:    "review-sandbox",
+		Services:           []string{"gitlab", "redmine"},
 		RunTimeoutSeconds:  3600,
 		HookTimeoutSeconds: 120,
 		MaxRequestBytes:    1 << 20,
