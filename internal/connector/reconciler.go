@@ -306,7 +306,7 @@ func (r *Reconciler) reconcileSnapshot(ctx context.Context, snapshot review.Snap
 		current[input.MRKey] = input
 	}
 
-	active, err := r.orpheus.ListActiveSessions(ctx, workflow.ID)
+	active, err := r.orpheus.ListActiveSessions(ctx, workflow.Namespace)
 	if err != nil {
 		return lifecycleError(LifecyclePhaseRecover, lifecycleCode(err), retryable(err), err)
 	}
@@ -572,7 +572,7 @@ func (r *Reconciler) inspectCandidate(ctx context.Context, input review.Input) (
 	}
 
 	key := orpheus.ReviewSessionKey{
-		Namespace:         workflow.ID,
+		Namespace:         workflow.Namespace,
 		MRKey:             input.MRKey,
 		ReviewFingerprint: input.ReviewFingerprint,
 	}
@@ -587,7 +587,7 @@ func (r *Reconciler) inspectCandidate(ctx context.Context, input review.Input) (
 	if len(sessions) == 1 {
 		return false, r.reconcileSession(ctx, input, sessions[0])
 	}
-	latest, err := r.orpheus.FindLatestSession(ctx, workflow.ID, input.MRKey)
+	latest, err := r.orpheus.FindLatestSession(ctx, workflow.Namespace, input.MRKey)
 	if err != nil {
 		return false, lifecycleError(LifecyclePhaseRecover, lifecycleCode(err), retryable(err), err)
 	}

@@ -2,6 +2,7 @@ package workflow
 
 const (
 	ID                    = "gitlab-mr-review"
+	Namespace             = "gitlab/mr-review"
 	MetadataSchemaVersion = 1
 	ArtifactSchemaVersion = 1
 	BundleSchemaVersion   = 1

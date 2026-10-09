@@ -85,7 +85,7 @@ request ineligible.
 
 Each snapshot has two ordered phases.
 
-The recovery phase first lists active Sessions in the `gitlab-mr-review` namespace. It validates each
+The recovery phase first lists active Sessions in the `gitlab/mr-review` namespace. It validates each
 Session against immutable message metadata and current GitLab state. If a Session is absent from the
 snapshot, the connector fetches its merge request using IDs stored in metadata. This detects closure,
 reviewer removal, or diff changes that happened before the first poll of a new process.

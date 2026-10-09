@@ -585,7 +585,7 @@ func TestReconcilerAndAdapterHTTPContract(t *testing.T) {
 		response.Header().Set("Content-Type", "application/json")
 		switch request.Method + " " + request.URL.Path {
 		case http.MethodGet + " /api/v1/runs":
-			require.Equal(t, workflow.ID, request.URL.Query().Get("namespace"))
+			require.Equal(t, workflow.Namespace, request.URL.Query().Get("namespace"))
 			require.Equal(t, "https://gitlab.example.com:74!2989", request.URL.Query().Get("external_key"))
 			if request.URL.Query().Get("input_fingerprint") == "" {
 				require.Equal(t, "desc", request.URL.Query().Get("order"))
@@ -598,7 +598,7 @@ func TestReconcilerAndAdapterHTTPContract(t *testing.T) {
 			require.NotEmpty(t, request.Header.Get("Idempotency-Key"))
 			var body map[string]any
 			require.NoError(t, json.NewDecoder(request.Body).Decode(&body))
-			require.Equal(t, workflow.ID, body["namespace"])
+			require.Equal(t, workflow.Namespace, body["namespace"])
 			require.Equal(t, false, body["allow_multiple_runs"])
 			configuration := body["configuration"].(map[string]any)
 			sandbox := configuration["sandbox"].(map[string]any)
@@ -1029,7 +1029,7 @@ func TestReconcilerCancelsActiveRequestsAfterShutdownTimeout(t *testing.T) {
 func testSessionContract(input review.Input) workflow.SessionContract {
 	allowMultiple := false
 	key := orpheus.ReviewSessionKey{
-		Namespace:         workflow.ID,
+		Namespace:         workflow.Namespace,
 		MRKey:             input.MRKey,
 		ReviewFingerprint: input.ReviewFingerprint,
 	}
