@@ -84,7 +84,7 @@ func BuildSessionContract(input review.Input, options Options) (SessionContract,
 	messageExternalKey := MessageExternalKey(input.ReviewFingerprint)
 	allowMultipleRuns := false
 	key := orpheus.ReviewSessionKey{
-		Namespace:         ID,
+		Namespace:         Namespace,
 		MRKey:             input.MRKey,
 		ReviewFingerprint: input.ReviewFingerprint,
 	}

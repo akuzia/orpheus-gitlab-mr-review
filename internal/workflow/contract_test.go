@@ -31,7 +31,7 @@ func TestBuildSessionContract(t *testing.T) {
 	contract, err := BuildSessionContract(input, options)
 
 	require.NoError(t, err)
-	require.Equal(t, ID, contract.Key.Namespace)
+	require.Equal(t, Namespace, contract.Key.Namespace)
 	require.Equal(t, input.MRKey, contract.Key.MRKey)
 	require.Equal(t, input.ReviewFingerprint, contract.Key.ReviewFingerprint)
 	require.Equal(t, input.Reviewer.ID, contract.ReviewerID)
@@ -61,7 +61,7 @@ func TestBuildSessionContract(t *testing.T) {
 
 	request := contract.Request
 	require.False(t, *request.AllowMultipleRuns)
-	require.Equal(t, ID, *request.Namespace)
+	require.Equal(t, Namespace, *request.Namespace)
 	require.Equal(t, input.MRKey, *request.ExternalKey)
 	require.Equal(t, input.ReviewFingerprint, *request.InputFingerprint)
 	require.Equal(t, "review-profile", request.Configuration.Agent.Profile)

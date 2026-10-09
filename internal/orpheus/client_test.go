@@ -33,7 +33,7 @@ func TestFindSessionsUsesExactIdentityAndPaginates(t *testing.T) {
 		require.Equal(t, http.MethodGet, request.Method)
 		require.Equal(t, "/api/v1/runs", request.URL.Path)
 		require.Equal(t, "Bearer secret", request.Header.Get("Authorization"))
-		require.Equal(t, "gitlab-mr-review", request.URL.Query().Get("namespace"))
+		require.Equal(t, "gitlab/mr-review", request.URL.Query().Get("namespace"))
 		require.Equal(t, "https://gitlab.example.com:42!17", request.URL.Query().Get("external_key"))
 		require.Equal(t, "review-fingerprint", request.URL.Query().Get("input_fingerprint"))
 		require.Equal(t, "asc", request.URL.Query().Get("order"))
@@ -95,7 +95,7 @@ func TestListActiveSessionsReadsLatestRunAndProjectsRecoveryIdentity(t *testing.
 		case "/api/v1/sessions":
 			require.Equal(t, http.MethodGet, request.Method)
 			require.Equal(t, "active", request.URL.Query().Get("activity"))
-			require.Equal(t, "gitlab-mr-review", request.URL.Query().Get("namespace"))
+			require.Equal(t, "gitlab/mr-review", request.URL.Query().Get("namespace"))
 			require.Equal(t, "asc", request.URL.Query().Get("order"))
 			_, _ = io.WriteString(response, `{
 				"items":[{
@@ -125,7 +125,7 @@ func TestListActiveSessionsReadsLatestRunAndProjectsRecoveryIdentity(t *testing.
 	t.Cleanup(server.Close)
 	client := newTestClient(t, server.URL)
 
-	sessions, err := client.ListActiveSessions(context.Background(), "gitlab-mr-review")
+	sessions, err := client.ListActiveSessions(context.Background(), "gitlab/mr-review")
 
 	require.NoError(t, err)
 	require.Equal(t, 2, requests)
@@ -202,7 +202,7 @@ func TestFindLatestSessionUsesMRIdentityWithoutFingerprint(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		require.Equal(t, "/api/v1/runs", request.URL.Path)
-		require.Equal(t, "gitlab-mr-review", request.URL.Query().Get("namespace"))
+		require.Equal(t, "gitlab/mr-review", request.URL.Query().Get("namespace"))
 		require.Equal(t, "gitlab.example.com:42!17", request.URL.Query().Get("external_key"))
 		require.Empty(t, request.URL.Query().Get("input_fingerprint"))
 		require.Equal(t, "desc", request.URL.Query().Get("order"))
@@ -222,7 +222,7 @@ func TestFindLatestSessionUsesMRIdentityWithoutFingerprint(t *testing.T) {
 	t.Cleanup(server.Close)
 	client := newTestClient(t, server.URL)
 
-	session, err := client.FindLatestSession(t.Context(), "gitlab-mr-review", "gitlab.example.com:42!17")
+	session, err := client.FindLatestSession(t.Context(), "gitlab/mr-review", "gitlab.example.com:42!17")
 
 	require.NoError(t, err)
 	require.NotNil(t, session)
@@ -295,7 +295,7 @@ func TestCreateSessionIsAtomicAndUsesStableIdentityKey(t *testing.T) {
 		var body map[string]any
 		require.NoError(t, json.NewDecoder(request.Body).Decode(&body))
 		requestBodies = append(requestBodies, body)
-		require.Equal(t, "gitlab-mr-review", body["namespace"])
+		require.Equal(t, "gitlab/mr-review", body["namespace"])
 		require.Equal(t, "https://gitlab.example.com:42!17", body["external_key"])
 		require.Equal(t, "review-fingerprint", body["input_fingerprint"])
 		require.Equal(t, false, body["allow_multiple_runs"])
@@ -335,7 +335,7 @@ func TestCreateSessionIsAtomicAndUsesStableIdentityKey(t *testing.T) {
 	require.Equal(t, idempotencyKeys[0], idempotencyKeys[1])
 	require.Equal(t, requestBodies[0], requestBodies[1])
 	require.Equal(t,
-		"96483226-2430-578b-a7ea-e7bfc96700f7",
+		"ded6690e-fcbc-54ad-9e7e-6c8279c68480",
 		idempotencyKeys[0],
 	)
 }
@@ -484,7 +484,7 @@ func TestCodeHandlesWrappedAndForeignErrors(t *testing.T) {
 
 func testReviewSessionKey() ReviewSessionKey {
 	return ReviewSessionKey{
-		Namespace:         "gitlab-mr-review",
+		Namespace:         "gitlab/mr-review",
 		MRKey:             "https://gitlab.example.com:42!17",
 		ReviewFingerprint: "review-fingerprint",
 	}
