@@ -135,7 +135,9 @@ connector adds an output language directive only when `language` is present. It 
 responses, finding titles and bodies, recommendations, resolution explanations and recurrence
 comments. Without `language`, the connector imposes no output language. Protocol field names, enum
 values and hidden markers stay unchanged. Default completion, failure and skip messages are English
-with ✅, ⚠️ and ⏭️ emoji. `language` does not translate service messages or custom publication templates.
+with ✅, ⚠️ and ⏭️ emoji. The failure note includes the public Orpheus error message or a safe
+application failure description, without a session link. `language` does not translate service
+messages or custom publication templates.
 
 ### Publication notes
 
@@ -145,12 +147,10 @@ Customize completion and failure text through the optional `notes` block in a wo
 notes:
   success: "✅ Review completed. Confirmed findings: {{ .FindingsCount }}."
   fail: |
-    ⚠️ Review could not be completed: {{ .Reason }}.
-
-    Orpheus session: {{ .SessionURL }}
+    Review could not be completed: {{ .Reason }}
 ```
 
-Each field is optional. Omitting it uses the existing English service message. Custom templates replace
+Each field is optional. Omitting it uses the default service message. Custom templates replace
 the whole visible note, including emoji and any links; the connector appends its hidden marker itself.
 Write templates in the language you want to publish. They are separate from the instructions sent to
 the agent and are not affected by `language`.
@@ -160,7 +160,7 @@ Templates support fixed placeholders:
 | Placeholder | Value |
 | --- | --- |
 | `{{ .FindingsCount }}` | Number of confirmed findings in the successful review, including zero. |
-| `{{ .Reason }}` | Allowlisted English failure reason; raw errors, credentials and hook output are never substituted. |
+| `{{ .Reason }}` | Public Orpheus error message when available, otherwise an allowlisted application failure description. Markdown, HTML and mentions are escaped; raw application errors and hook output are never substituted. |
 | `{{ .SessionURL }}` | Public Orpheus session URL for a failure, or an empty string when unavailable. |
 
 Only these substitutions are supported; template functions, conditions and other expressions are

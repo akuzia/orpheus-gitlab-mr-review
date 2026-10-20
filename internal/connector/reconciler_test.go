@@ -324,6 +324,59 @@ func TestReconcilerPublishesTerminalErrorWithoutAnalysisRetry(t *testing.T) {
 	require.Zero(t, client.createCalls)
 }
 
+func TestReconcilerPublishesSessionErrorMessages(t *testing.T) {
+	for name, test := range map[string]struct {
+		session orpheus.Session
+		message string
+	}{
+		"run error": {
+			session: orpheus.Session{Status: "failed", ErrorMessage: "Selected model is at capacity", AgentErrorMessage: "Agent failure"},
+			message: "Selected model is at capacity",
+		},
+		"agent fallback": {
+			session: orpheus.Session{Status: "failed", ErrorMessage: " \n ", AgentErrorMessage: "Selected model is at capacity"},
+			message: "Selected model is at capacity",
+		},
+		"completed run with failed agent": {
+			session: orpheus.Session{Status: "completed", AgentStatus: "failed", AgentErrorMessage: "Selected model is at capacity"},
+			message: "Selected model is at capacity",
+		},
+		"hook error": {
+			session: orpheus.Session{Status: "completed", AgentStatus: "completed", Hooks: []orpheus.HookResult{{Name: "after_run", Status: "failed", ErrorMessage: "Hook execution failed", Output: "private hook output"}}},
+			message: "Hook execution failed",
+		},
+		"validation failure ignores session error": {
+			session: orpheus.Session{Status: "completed", AgentStatus: "completed", ErrorMessage: "Unrelated run error", AgentErrorMessage: "Unrelated agent error"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			test.session.ID, test.session.RunID = "session-1", "run-1"
+			client := &orpheusMock{find: func(context.Context, orpheus.ReviewSessionKey) ([]orpheus.Session, error) {
+				return []orpheus.Session{test.session}, nil
+			}}
+			publisher := &reviewPublisherStub{}
+			reconciler := NewReconciler(zap.NewNop(), nil, client, func(review.Input) (workflow.SessionContract, error) {
+				t.Fatal("an existing session must not start another analysis")
+				return workflow.SessionContract{}, nil
+			}, ReconcilerConfig{Publisher: publisher})
+			require.NoError(t, reconciler.Reconcile(t.Context(), eligibleReviewInput()))
+			require.Equal(t, 1, publisher.errorCalls)
+			require.Equal(t, test.message, publisher.failure.Message)
+			require.Zero(t, client.createCalls)
+		})
+	}
+}
+
+func TestApplicationFailureDoesNotPublishRawErrorOrSessionMessage(t *testing.T) {
+	publisher := &reviewPublisherStub{}
+	reconciler := NewReconciler(zap.NewNop(), nil, &orpheusMock{}, nil, ReconcilerConfig{Publisher: publisher})
+	err := publicationLifecycleError(&publication.Error{Code: "unknown_discussion_resolution_cause", Err: errors.New("private raw application error")})
+	require.NoError(t, reconciler.finishFailure(t.Context(), eligibleReviewInput(), orpheus.Session{ID: "session-1", ErrorMessage: "Unrelated session error"}, err))
+	require.Equal(t, 1, publisher.errorCalls)
+	require.Equal(t, "unknown_discussion_resolution_cause", publisher.failure.Code)
+	require.Empty(t, publisher.failure.Message)
+}
+
 func TestReconcilerValidatesCompletedBundleAgainstImmutableMetadata(t *testing.T) {
 	t.Parallel()
 
