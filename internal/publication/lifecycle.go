@@ -3,6 +3,7 @@ package publication
 import (
 	"context"
 	"errors"
+	"html"
 	"net/url"
 	"strings"
 
@@ -11,11 +12,13 @@ import (
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/review"
 )
 
-// Failure contains only a classification and a public session identity. Raw
-// errors, hook output, and credentials must never reach the GitLab note.
+// Failure contains a classification, an optional public Orpheus error message,
+// and a public session identity. Message must never contain raw application
+// errors, HTTP responses, credentials, or hook output.
 type Failure struct {
 	Notes     review.NoteTemplates
 	Code      string
+	Message   string
 	SessionID string
 }
 
@@ -49,16 +52,18 @@ func (p *Publisher) PublishError(ctx context.Context, input review.Input, failur
 		return err
 	}
 	marker := ErrorMarker(input.ReviewFingerprint)
-	body := "⚠️ Automated review could not be completed: " + safeFailureReason(failure.Code) + "."
-	if link := p.sessionURL(failure.SessionID); link != "" {
-		body += "\n\n[Review details in Orpheus](" + link + ")"
+	reason := strings.TrimSpace(failure.Message)
+	if reason == "" {
+		reason = safeFailureReason(failure.Code)
 	}
-	if failure.Notes.Fail != "" {
-		rendered, err := review.RenderNote(failure.Notes.Fail, review.NoteData{Reason: safeFailureReason(failure.Code), SessionURL: p.sessionURL(failure.SessionID)})
-		if err != nil {
-			return permanent("invalid_failure_note", err)
-		}
-		body = rendered
+	reason = escapeFailureMessage(reason)
+	noteTemplate := failure.Notes.Fail
+	if noteTemplate == "" {
+		noteTemplate = "⚠️ Automated review could not be completed: {{ .Reason }}."
+	}
+	body, err := review.RenderNote(noteTemplate, review.NoteData{Reason: reason, SessionURL: p.sessionURL(failure.SessionID)})
+	if err != nil {
+		return permanent("invalid_failure_note", err)
 	}
 	discussions, err = p.ensureNote(ctx, input, body+"\n\n"+marker, marker, discussions)
 	if err != nil {
@@ -68,6 +73,14 @@ func (p *Publisher) PublishError(ctx context.Context, input review.Input, failur
 		return unconfirmed("error_marker_missing")
 	}
 	return p.removeReviewer(ctx, input)
+}
+
+// Display public error messages literally, without interpreting Markdown, HTML,
+// mentions, or embedded service markers from an upstream provider.
+func escapeFailureMessage(message string) string {
+	message = strings.ReplaceAll(strings.ReplaceAll(message, "\r\n", "\n"), "\r", "\n")
+	message = html.EscapeString(message)
+	return strings.NewReplacer("\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]", "~", "\\~", "@", "&#64;").Replace(message)
 }
 
 // Discard never publishes a result. For a changed or incomplete diff it removes
@@ -160,7 +173,30 @@ func safeFailureReason(code string) string {
 	case "run_failed", "run_cancelled", "agent_not_completed":
 		return "the review run did not finish successfully"
 	case "after_run_missing", "after_run_failed", "after_run_output_incomplete", "multiple_after_run_results":
-		return "the review result could not be collected and verified"
+		return "the review result could not be collected and verified (" + code + ")"
+	case "unknown_discussion_resolution_cause":
+		return "cannot determine how a GitLab discussion was resolved (unknown_discussion_resolution_cause)"
+	case "invalid_discussion_resolution_state":
+		return "a GitLab discussion is resolved without a resolution cause (invalid_discussion_resolution_state)"
+	case "previous_finding_not_owned", "resolution_not_owned":
+		return "the target discussion is not an Orpheus finding (" + code + ")"
+	case "previous_finding_disappeared", "resolution_target_disappeared":
+		return "the target GitLab discussion disappeared during publication (" + code + ")"
+	case "invalid_session_metadata", "session_metadata_mismatch":
+		return "the saved session metadata is invalid or does not match this review (" + code + ")"
+	case "publisher_not_configured", "invalid_success_note", "invalid_failure_note":
+		return "the review publication configuration is invalid (" + code + ")"
+	case "list_discussions", "list_diffs", "read_current_merge_request", "create_finding",
+		"reopen_discussion", "resolve_discussion", "create_resolution_reply", "create_note", "remove_reviewer":
+		return "a GitLab operation failed during review publication (" + code + ")"
+	case "envelope_too_large", "invalid_envelope_json", "unsupported_envelope_schema", "unsupported_envelope_encoding",
+		"declared_payload_size_out_of_bounds", "invalid_payload_base64", "payload_size_mismatch", "payload_digest_mismatch",
+		"invalid_payload_json", "payload_too_large", "unsupported_bundle_schema", "bundle_not_ready", "pending_findings",
+		"count_mismatch", "too_many_items", "workflow_identity_mismatch", "review_identity_mismatch", "review_fingerprint_mismatch",
+		"findings_not_sorted", "recommendations_not_sorted", "resolutions_not_sorted", "invalid_recommendation", "invalid_resolution",
+		"invalid_finding_id", "duplicate_finding_id", "invalid_finding_path", "invalid_finding_line", "invalid_finding_severity",
+		"invalid_finding_content", "invalid_previous_finding", "invalid_payload_compression":
+		return "the review result failed validation (" + code + ")"
 	default:
 		return "the review result could not be safely validated or published"
 	}

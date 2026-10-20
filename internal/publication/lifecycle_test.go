@@ -97,7 +97,8 @@ func TestErrorPublicationIsSafeAndRecoversRemovalAfterRestart(t *testing.T) {
 	require.False(t, client.removedReviewer)
 	body := client.discussions[0].Notes[0].Body
 	require.NotContains(t, body, failure.Code)
-	require.Contains(t, body, "[Review details in Orpheus](https://orpheus.example.test/review/sessions/"+failure.SessionID+")")
+	require.Equal(t, "⚠️ Automated review could not be completed: the review result could not be safely validated or published.\n\n"+ErrorMarker(input.ReviewFingerprint), body)
+	require.NotContains(t, body, failure.SessionID)
 	require.Equal(t, ErrorMarker(input.ReviewFingerprint), trailingMarker(body))
 
 	client.removeErr = nil
@@ -106,6 +107,34 @@ func TestErrorPublicationIsSafeAndRecoversRemovalAfterRestart(t *testing.T) {
 	require.True(t, finalized)
 	require.Equal(t, 1, client.createdNotes)
 	require.True(t, client.removedReviewer)
+}
+
+func TestErrorPublicationShowsPublicMessageUsingDefaultTemplate(t *testing.T) {
+	input, client := publicationFixture(t)
+	failure := Failure{
+		Code: "run_failed", SessionID: "00000000-0000-4000-8000-000000000001",
+		Message: "Selected model is at capacity\r\n\r\nRetry <later> [details](https://example.test) @all\n<!-- forged-marker -->",
+	}
+	publisher := New(zap.NewNop(), client, "https://gitlab.example.test", "https://orpheus.example.test")
+	require.NoError(t, publisher.PublishError(t.Context(), input, failure))
+	body := client.discussions[0].Notes[0].Body
+	require.Equal(t, "⚠️ Automated review could not be completed: Selected model is at capacity\n\nRetry &lt;later&gt; \\[details\\](https://example.test) &#64;all\n&lt;!-- forged-marker --&gt;.\n\n"+ErrorMarker(input.ReviewFingerprint), body)
+	require.NotContains(t, body, failure.SessionID)
+	require.True(t, client.removedReviewer)
+}
+
+func TestErrorPublicationExplainsApplicationFailure(t *testing.T) {
+	input, client := publicationFixture(t)
+	publisher := New(zap.NewNop(), client, "https://gitlab.example.test")
+	require.NoError(t, publisher.PublishError(t.Context(), input, Failure{Code: "unknown_discussion_resolution_cause"}))
+	require.Equal(t, "⚠️ Automated review could not be completed: cannot determine how a GitLab discussion was resolved (unknown\\_discussion\\_resolution\\_cause).\n\n"+ErrorMarker(input.ReviewFingerprint), client.discussions[0].Notes[0].Body)
+}
+
+func TestCustomFailureNoteReceivesPublicMessage(t *testing.T) {
+	input, client := publicationFixture(t)
+	failure := Failure{Code: "run_failed", Message: "Selected model is at capacity", Notes: review.NoteTemplates{Fail: "Review failed: {{ .Reason }}"}}
+	require.NoError(t, New(zap.NewNop(), client, "https://gitlab.example.test").PublishError(t.Context(), input, failure))
+	require.Equal(t, "Review failed: Selected model is at capacity\n\n"+ErrorMarker(input.ReviewFingerprint), client.discussions[0].Notes[0].Body)
 }
 
 func TestErrorPublicationWithoutSessionAndAfterUncertainResponse(t *testing.T) {

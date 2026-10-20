@@ -165,6 +165,8 @@ func TestFindSessionsProjectsAgentAndHookResults(t *testing.T) {
 				"session_id":"00000000-0000-4000-8000-000000000001",
 				"status":"completed",
 				"agent_status":"completed",
+				"error":{"code":"run_failed","message":"Run failure"},
+				"agent_error":{"code":"harness_failed","message":"Selected model is at capacity"},
 				"input_fingerprint":"review-fingerprint",
 				"created_at":"2026-10-02T10:00:00Z",
 				"hooks":[{
@@ -172,6 +174,7 @@ func TestFindSessionsProjectsAgentAndHookResults(t *testing.T) {
 					"name":"after_run",
 					"status":"completed",
 					"exit_code":0,
+					"error":{"code":"hook_failed","message":"Hook execution failed"},
 					"output_completeness":"complete",
 					"output":{"type":"text","text":"bundle-envelope","original_bytes":15}
 				}]
@@ -187,6 +190,10 @@ func TestFindSessionsProjectsAgentAndHookResults(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, sessions, 1)
 	require.Equal(t, "completed", sessions[0].AgentStatus)
+	require.Equal(t, "run_failed", sessions[0].ErrorCode)
+	require.Equal(t, "Run failure", sessions[0].ErrorMessage)
+	require.Equal(t, "harness_failed", sessions[0].AgentErrorCode)
+	require.Equal(t, "Selected model is at capacity", sessions[0].AgentErrorMessage)
 	require.Equal(t, []HookResult{{
 		Name:               "after_run",
 		Status:             "completed",
@@ -194,6 +201,8 @@ func TestFindSessionsProjectsAgentAndHookResults(t *testing.T) {
 		OutputCompleteness: "complete",
 		OutputType:         "text",
 		Output:             "bundle-envelope",
+		ErrorCode:          "hook_failed",
+		ErrorMessage:       "Hook execution failed",
 	}}, sessions[0].Hooks)
 }
 

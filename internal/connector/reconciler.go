@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/orpheus-agents/orpheus-gitlab-mr-review/internal/gitlab"
@@ -722,7 +723,7 @@ func (r *Reconciler) finishFailure(ctx context.Context, input review.Input, sess
 	if notesErr != nil {
 		return notesErr
 	}
-	if publishErr := r.publisher.PublishError(ctx, input, publication.Failure{Code: code, SessionID: session.ID, Notes: notes}); publishErr != nil {
+	if publishErr := r.publisher.PublishError(ctx, input, publication.Failure{Code: code, Message: sessionFailureMessage(code, session), SessionID: session.ID, Notes: notes}); publishErr != nil {
 		if errors.Is(publishErr, publication.ErrReviewInactive) {
 			return nil
 		}
@@ -735,6 +736,27 @@ func (r *Reconciler) finishFailure(ctx context.Context, input review.Input, sess
 		return publicationLifecycleError(publishErr)
 	}
 	return nil
+}
+
+// Only public Orpheus error messages may cross into publication. A completed
+// run's error must not hide a later validation or application failure.
+func sessionFailureMessage(code string, session orpheus.Session) string {
+	switch code {
+	case "run_failed", "run_cancelled":
+		if strings.TrimSpace(session.ErrorMessage) != "" {
+			return session.ErrorMessage
+		}
+		return session.AgentErrorMessage
+	case "agent_not_completed":
+		return session.AgentErrorMessage
+	case "after_run_failed":
+		for _, hook := range session.Hooks {
+			if hook.Name == "after_run" {
+				return hook.ErrorMessage
+			}
+		}
+	}
+	return ""
 }
 
 func (r *Reconciler) validateCompletedSession(ctx context.Context, input review.Input, session orpheus.Session) (protocol.Bundle, review.NoteTemplates, error) {

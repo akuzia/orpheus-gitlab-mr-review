@@ -41,17 +41,19 @@ type ReviewSessionKey struct {
 // The Orpheus run endpoint is used because it can filter by both the owning
 // session identity and the first run's input fingerprint in one request.
 type Session struct {
-	ID               string
-	RunID            string
-	MRKey            string
-	Status           string
-	InputFingerprint string
-	CreatedAt        time.Time
-	FinishedAt       *time.Time
-	ErrorCode        string
-	AgentStatus      string
-	AgentErrorCode   string
-	Hooks            []HookResult
+	ID                string
+	RunID             string
+	MRKey             string
+	Status            string
+	InputFingerprint  string
+	CreatedAt         time.Time
+	FinishedAt        *time.Time
+	ErrorCode         string
+	ErrorMessage      string
+	AgentStatus       string
+	AgentErrorCode    string
+	AgentErrorMessage string
+	Hooks             []HookResult
 }
 
 type HookResult struct {
@@ -63,6 +65,7 @@ type HookResult struct {
 	OutputType         string
 	Output             string
 	ErrorCode          string
+	ErrorMessage       string
 }
 
 type Accepted struct {
@@ -553,12 +556,14 @@ func sessionFromAPI(item api.Run) (Session, error) {
 	}
 	if item.Error != nil {
 		session.ErrorCode = item.Error.Code
+		session.ErrorMessage = item.Error.Message
 	}
 	if item.AgentStatus != nil {
 		session.AgentStatus = string(*item.AgentStatus)
 	}
 	if item.AgentError != nil {
 		session.AgentErrorCode = item.AgentError.Code
+		session.AgentErrorMessage = item.AgentError.Message
 	}
 	for _, item := range item.Hooks {
 		hook := HookResult{
@@ -572,6 +577,7 @@ func sessionFromAPI(item api.Run) (Session, error) {
 		}
 		if item.Error != nil {
 			hook.ErrorCode = item.Error.Code
+			hook.ErrorMessage = item.Error.Message
 		}
 		if item.Output != nil {
 			output, err := item.Output.AsTextResult()
