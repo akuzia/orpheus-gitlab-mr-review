@@ -457,7 +457,6 @@ func classifyDiscussionResolution(discussion *Discussion, item discussionFromAPI
 	discussion.ResolvedAt = item.ResolvedAt
 	discussion.ResolvedBy = User{ID: item.ResolvedBy.ID, Username: item.ResolvedBy.Username}
 	resolvedByPush := item.ResolvedByPush
-	resolutionCauseKnown := item.ResolvedByPush != nil
 
 	for i := len(discussion.Notes) - 1; i >= 0; i-- {
 		note := discussion.Notes[i]
@@ -473,7 +472,6 @@ func classifyDiscussionResolution(discussion *Discussion, item discussionFromAPI
 		}
 		if resolvedByPush == nil && i < len(item.Notes) && item.Notes[i].ResolvedByPush != nil {
 			resolvedByPush = item.Notes[i].ResolvedByPush
-			resolutionCauseKnown = true
 		}
 		break
 	}
@@ -485,7 +483,8 @@ func classifyDiscussionResolution(discussion *Discussion, item discussionFromAPI
 		discussion.ResolutionCause = ResolutionCauseOutdatedByPush
 		return
 	}
-	if resolutionCauseKnown && discussion.ResolvedBy.ID > 0 {
+	// GitLab may omit resolved_by_push for an explicitly resolved discussion.
+	if discussion.ResolvedBy.ID > 0 {
 		discussion.ResolutionCause = ResolutionCauseExplicit
 		return
 	}

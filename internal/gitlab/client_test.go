@@ -115,6 +115,7 @@ func TestListMergeRequestDiscussionsClassifiesResolutionCause(t *testing.T) {
 		_, _ = fmt.Fprint(response, `[
 			{
 				"id":"outdated","resolvable":true,"resolved":true,"resolved_by_push":true,
+				"resolved_by":{"id":7,"username":"developer"},
 				"notes":[{
 					"id":10,"body":"finding","author":{"id":123,"username":"orpheus"},
 					"resolvable":true,"resolved":true,"resolved_by_push":true,
@@ -148,6 +149,53 @@ func TestListMergeRequestDiscussionsClassifiesResolutionCause(t *testing.T) {
 	require.Equal(t, ResolutionCauseExplicit, discussions[1].ResolutionCause)
 	require.Equal(t, int64(7), discussions[1].ResolvedBy.ID)
 	require.Equal(t, ResolutionCauseUnknown, discussions[2].ResolutionCause)
+}
+
+func TestListMergeRequestDiscussionsClassifiesExplicitResolutionWithoutResolvedByPush(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "discussion resolver",
+			body: `[{
+				"id":"note_423465","resolvable":true,"resolved":true,
+				"resolved_by":{"id":7,"username":"muxx"},
+				"notes":[{"id":423465,"resolvable":true,"resolved":true}]
+			}]`,
+		},
+		{
+			name: "note resolver",
+			body: `[{
+				"id":"note_423465",
+				"notes":[{
+					"id":423465,"resolvable":true,"resolved":true,
+					"resolved_by":{"id":7,"username":"muxx"}
+				}]
+			}]`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				response.Header().Set("Content-Type", "application/json")
+				require.Equal(t, "/api/v4/projects/42/merge_requests/17/discussions", request.URL.Path)
+				_, _ = fmt.Fprint(response, test.body)
+			}))
+			t.Cleanup(server.Close)
+
+			discussions, err := newTestClient(t, server.URL).ListMergeRequestDiscussions(t.Context(), 42, 17)
+
+			require.NoError(t, err)
+			require.Len(t, discussions, 1)
+			require.True(t, discussions[0].Resolved)
+			require.Equal(t, User{ID: 7, Username: "muxx"}, discussions[0].ResolvedBy)
+			require.Equal(t, ResolutionCauseExplicit, discussions[0].ResolutionCause)
+		})
+	}
 }
 
 func TestPublicationHTTPContract(t *testing.T) {
